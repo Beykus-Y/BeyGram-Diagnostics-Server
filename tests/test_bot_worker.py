@@ -416,3 +416,41 @@ async def test_expired_nonce_not_reconfirmed(ctx, db, settings):
 )
 def test_parse_command(text, expected):
     assert bot_worker._parse_command(text) == expected
+
+
+async def test_allowlist_updates_take_effect_without_restart(ctx, db, settings):
+    """The same running bot context sees add/revoke/restore on the next /report."""
+    from app.security import generate_nonce
+
+    user_id = 700099
+    denied_before = generate_nonce()
+    await bot_worker._handle_update(
+        ctx, _update(user_id, f"/report {denied_before}", update_id=3100)
+    )
+    assert _nonce_state(db, settings, denied_before) is None
+
+    # A live admin write in SQLite immediately allows the next command.
+    with db.transaction() as conn:
+        allowlist.add(conn, user_id, label="QA tester")
+    allowed = generate_nonce()
+    await bot_worker._handle_update(
+        ctx, _update(user_id, f"/report {allowed}", update_id=3101)
+    )
+    assert _nonce_state(db, settings, allowed) is not None
+
+    with db.transaction() as conn:
+        allowlist.revoke(conn, user_id, reason="admin")
+        nonces.revoke_for_user(conn, user_id)
+    denied_after = generate_nonce()
+    await bot_worker._handle_update(
+        ctx, _update(user_id, f"/report {denied_after}", update_id=3102)
+    )
+    assert _nonce_state(db, settings, denied_after) is None
+
+    with db.transaction() as conn:
+        allowlist.add(conn, user_id, label="QA tester")
+    restored = generate_nonce()
+    await bot_worker._handle_update(
+        ctx, _update(user_id, f"/report {restored}", update_id=3103)
+    )
+    assert _nonce_state(db, settings, restored) is not None
