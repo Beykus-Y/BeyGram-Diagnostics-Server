@@ -438,3 +438,23 @@ def test_tester_restore_requires_csrf_and_existing_revoked_entry(client):
         "csrf": csrf, "user_id": "818234",
     })
     assert "Запись не найдена" in missing.text
+
+
+def test_non_ascii_and_oversized_tester_ids_are_rejected(client):
+    _login(client)
+    csrf = _csrf(client)
+    for bad_id in ("٠١٢٣٤٥", "999999999999999999999999999", "0", "-42"):
+        response = client.post("/admin/testers/add", data={
+            "csrf": csrf, "user_id": bad_id,
+        })
+        assert "Некорректный" in response.text
+        response = client.post("/admin/testers/revoke", data={
+            "csrf": csrf, "user_id": bad_id,
+        })
+        assert "Некорректный" in response.text
+
+
+def test_failed_login_keeps_stylesheet_and_401(client):
+    response = client.post("/admin/login", data={"token": "wrong-token"})
+    assert response.status_code == 401
+    assert "href='/admin/assets/admin.css'" in response.text
