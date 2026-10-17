@@ -24,10 +24,11 @@ from __future__ import annotations
 import html
 import json
 import logging
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from .. import admin_sessions
 from ..config import Settings
@@ -42,6 +43,7 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 
 _SCOPE_ADMIN_LOGIN = "admin_login"
 _PAGE_SIZE = 25
+_STYLESHEET = Path(__file__).resolve().parent.parent / "static" / "admin.css"
 
 
 # --- Подписи и сессии -------------------------------------------------------
@@ -78,35 +80,46 @@ def _secure_headers() -> dict[str, str]:
         "X-Frame-Options": "DENY",
         "X-Content-Type-Options": "nosniff",
         "Referrer-Policy": "no-referrer",
-        "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'",
+        "Content-Security-Policy": "default-src 'none'; style-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
     }
 
 
+@router.get("/assets/admin.css", include_in_schema=False)
+async def admin_stylesheet(request: Request) -> Response:
+    """Только локальный CSS админки; при выключенной панели отдаём 404."""
+    if not request.app.state.context.settings.admin_token:
+        return _not_found()
+    return FileResponse(
+        _STYLESHEET,
+        media_type="text/css; charset=utf-8",
+        headers={"Cache-Control": "private, max-age=3600", "X-Content-Type-Options": "nosniff"},
+    )
+
+
 def _page(title: str, body: str) -> HTMLResponse:
+    safe_title = html.escape(title)
     return HTMLResponse(
         content=(
             "<!doctype html><html lang='ru'><head><meta charset='utf-8'>"
             "<meta name='viewport' content='width=device-width, initial-scale=1'>"
-            f"<title>{html.escape(title)} — BeyGram</title>"
-            "<style>"
-            "body{font-family:system-ui,sans-serif;margin:2rem auto;max-width:60rem;padding:0 1rem;color:#1a1a2e}"
-            "table{border-collapse:collapse;width:100%;margin:1rem 0}"
-            "th,td{border:1px solid #ccc;padding:.35rem .5rem;text-align:left;font-size:.9rem}"
-            "th{background:#eef1f6}"
-            "code,pre{background:#f4f4f8;padding:.15rem .3rem;border-radius:4px;font-size:.85rem}"
-            "pre{padding:.7rem;overflow-x:auto;white-space:pre-wrap;word-break:break-word}"
-            ".btn,.toggle{display:inline-block;padding:.3rem .8rem;border:1px solid #445;"
-            "border-radius:6px;background:#eef1f6;text-decoration:none;color:#1a1a2e;cursor:pointer}"
-            ".danger{background:#fbe9e9;border-color:#a33}"
-            ".ok{color:#186a2c}.bad{color:#a11d2e}.muted{color:#667}"
-            "nav a{margin-right:1rem}"
-            "form.inline{display:inline}"
-            "</style></head><body>"
-            "<nav><a href='/admin'>Обзор</a><a href='/admin/reports'>Отчёты</a>"
-            "<a href='/admin/testers'>Тестировщики</a><a href='/admin/audit'>Аудит</a>"
-            "<form class='inline' method='post' action='/admin/logout'>"
-            "<button class='btn' type='submit'>Выйти</button></form></nav><hr>"
-            f"<h1>{html.escape(title)}</h1>{body}</body></html>"
+            "<meta name='theme-color' content='#6357d9'>"
+            f"<title>{safe_title} — BeyGram Diagnostics</title>"
+            "<link rel='stylesheet' href='/admin/assets/admin.css'>"
+            "</head><body><div class='shell'>"
+            "<header class='topbar'>"
+            "<a class='brand' href='/admin'><span class='brand-mark' aria-hidden='true'>B</span>"
+            "<span class='brand-copy'>BeyGram<small>Diagnostics console</small></span></a>"
+            "<nav class='nav-links' aria-label='Управление'>"
+            "<a href='/admin'>Обзор</a><a href='/admin/reports'>Отчёты</a>"
+            "<a href='/admin/testers'>Доступ</a><a href='/admin/audit'>Аудит</a></nav>"
+            "<form method='post' action='/admin/logout'>"
+            "<button class='btn secondary' type='submit'>Выйти</button></form>"
+            "</header><header class='page-header'>"
+            "<div class='eyebrow'>BeyGram / Administration</div>"
+            f"<h1>{safe_title}</h1></header>"
+            f"<main class='main-panel'>{body}</main>"
+            "<footer class='footer'>BeyGram Diagnostics · доступ только для администратора</footer>"
+            "</div></body></html>"
         ),
         headers=_secure_headers(),
     )
@@ -166,7 +179,7 @@ async def login_page(request: Request) -> Response:
         "Вход",
         "<form method='post' action='/admin/login'>"
         "<p><input type='password' name='token' placeholder='ADMIN_TOKEN' "
-        "autocomplete='current-password' required style='min-width:20rem'></p>"
+        "autocomplete='current-password' required></p>"
         "<button class='btn' type='submit'>Войти</button></form>",
     )
 
@@ -567,7 +580,8 @@ async def export_report(request: Request, report_id: str) -> Response:
 
 
 @router.get("/testers")
-async def testers_page(request: Request) -> Response:
+async def testers_page(request: Request, q: str = "", status: str = "all") -> Response:
+    """Управление allowlist: изменения сразу видны bot-worker через общую SQLite."""
     ctx = request.app.state.context
     settings: Settings = ctx.settings
     guarded = _guard(request, settings, await _session(ctx, request))
@@ -575,41 +589,85 @@ async def testers_page(request: Request) -> Response:
         return guarded
     db: Database = ctx.db
 
-    def _load():
-        with db.transaction() as conn:
-            return allowlist.list_all(conn, active_only=False)
-
-    entries = await db.run(_load)
-    rows = "".join(
-        "<tr>"
-        f"<td>{entry.telegram_user_id}</td>"
-        f"<td>{'активен' if entry.active else 'отозван'}</td>"
-        f"<td>{html.escape(entry.label or '—')}</td>"
-        f"<td>{_fmt_ts(entry.created_at)}</td>"
-        + (
-            f"<td><form class='inline' method='post' action='/admin/testers/revoke'>"
-            f"<input type='hidden' name='csrf' value='{guarded[1]}'>"
-            f"<input type='hidden' name='user_id' value='{entry.telegram_user_id}'>"
-            "<button class='btn danger' type='submit'>Отозвать</button></form></td>"
-            if entry.active
-            else "<td class='muted'>—</td>"
-        )
-        + "</tr>"
+    entries = await db.run(lambda: allowlist.list_all(db.connection))
+    active_count = sum(1 for entry in entries if entry.active)
+    query = q.strip()[:80].casefold()
+    selected = status if status in {"all", "active", "revoked"} else "all"
+    filtered = [
+        entry
         for entry in entries
-    ) or "<tr><td colspan='5' class='muted'>список пуст</td></tr>"
+        if (selected == "all" or (entry.active if selected == "active" else not entry.active))
+        and (not query or query in str(entry.telegram_user_id) or query in entry.label.casefold())
+    ]
 
-    body = (
-        "<h2>Добавить</h2>"
-        "<form method='post' action='/admin/testers/add'>"
-        f"<input type='hidden' name='csrf' value='{guarded[1]}'>"
-        "<input name='user_id' placeholder='Telegram user id' required pattern='[0-9]+'> "
-        "<input name='label' placeholder='метка'> "
-        "<button class='btn' type='submit'>Добавить</button></form>"
-        "<h2>Список</h2>"
-        "<table><tr><th>user id</th><th>состояние</th><th>метка</th><th>добавлен</th><th></th></tr>"
-        f"{rows}</table>"
+    def _row(entry) -> str:
+        status_label = (
+            "<span class='status-pill active'>Активен</span>"
+            if entry.active else "<span class='status-pill revoked'>Отозван</span>"
+        )
+        if entry.active:
+            action = (
+                "<form class='inline' method='post' action='/admin/testers/revoke'>"
+                f"<input type='hidden' name='csrf' value='{guarded[1]}'>"
+                f"<input type='hidden' name='user_id' value='{entry.telegram_user_id}'>"
+                "<button class='btn danger' type='submit' title='Отозвать новые запросы и отменить ожидающие отчёты'>"
+                "Отозвать</button></form>"
+            )
+        else:
+            action = (
+                "<form class='inline' method='post' action='/admin/testers/restore'>"
+                f"<input type='hidden' name='csrf' value='{guarded[1]}'>"
+                f"<input type='hidden' name='user_id' value='{entry.telegram_user_id}'>"
+                "<button class='btn secondary' type='submit'>Разрешить снова</button></form>"
+            )
+        return (
+            "<tr>"
+            f"<td><code>{entry.telegram_user_id}</code></td><td>{status_label}</td>"
+            f"<td>{html.escape(entry.label or '—')}</td>"
+            f"<td>{_fmt_ts(entry.updated_at)}</td><td>{action}</td></tr>"
+        )
+
+    rows = "".join(_row(entry) for entry in filtered) or (
+        "<tr><td colspan='5' class='empty-state'>Пользователи не найдены</td></tr>"
     )
-    return _page("Тестировщики", body)
+    opts = "".join(
+        f"<option value='{key}'{' selected' if key == selected else ''}>{label}</option>"
+        for key, label in (
+            ("all", "Все"), ("active", "Активные"), ("revoked", "Отозванные")
+        )
+    )
+    body = (
+        "<div class='notice success'><b>Без перезапуска бота.</b> "
+        "Доступ хранится в SQLite и проверяется при каждой команде /report. "
+        "Отзыв также аннулирует ожидающие nonce и отчёты.</div>"
+        "<div class='kpi-strip'>"
+        f"<div class='kpi'><b>{active_count}</b><span>Активных</span></div>"
+        f"<div class='kpi'><b>{len(entries) - active_count}</b><span>Отозванных</span></div>"
+        f"<div class='kpi'><b>{len(entries)}</b><span>Всего</span></div>"
+        "</div>"
+        "<h2>Разрешить отправку отчётов</h2>"
+        "<form class='form-row' method='post' action='/admin/testers/add'>"
+        f"<input type='hidden' name='csrf' value='{guarded[1]}'>"
+        "<div class='field'><label for='new-id'>Telegram user ID</label>"
+        "<input id='new-id' name='user_id' inputmode='numeric' "
+        "placeholder='123456789' required pattern='[0-9]+' maxlength='20'></div>"
+        "<div class='field'><label for='new-label'>Описание</label>"
+        "<input id='new-label' name='label' maxlength='100' placeholder='Например, тестировщик'></div>"
+        "<button class='btn' type='submit'>+ Добавить</button></form>"
+        "<h2>Кто может отправлять отчёты</h2>"
+        "<form class='toolbar' method='get' action='/admin/testers'>"
+        "<div class='field search'><label for='tester-query'>Поиск по ID или описанию</label>"
+        f"<input id='tester-query' name='q' value='{html.escape(q.strip()[:80], quote=True)}' "
+        "placeholder='Поиск' maxlength='80'></div>"
+        "<div class='field'><label for='tester-status'>Статус</label>"
+        f"<select id='tester-status' name='status'>{opts}</select></div>"
+        "<button class='btn secondary' type='submit'>Применить</button></form>"
+        f"<p class='muted'>Показано: {len(filtered)} из {len(entries)}.</p>"
+        "<div class='table-scroll'><table><thead><tr>"
+        "<th>User ID</th><th>Статус</th><th>Описание</th><th>Изменён</th><th>Действие</th>"
+        f"</tr></thead><tbody>{rows}</tbody></table></div>"
+    )
+    return _page("Доступ к отчётам", body)
 
 
 @router.post("/testers/add")
@@ -641,6 +699,43 @@ async def testers_add(request: Request) -> Response:
             )
 
     await db.run(_add)
+    return RedirectResponse("/admin/testers", status_code=303)
+
+
+@router.post("/testers/restore")
+async def testers_restore(request: Request) -> Response:
+    """Повторно разрешает ранее отозванному пользователю присылать отчёты."""
+    ctx = request.app.state.context
+    guarded = _guard(request, ctx.settings, await _session(ctx, request))
+    if isinstance(guarded, Response):
+        return guarded
+    form = dict(await request.form())
+    if not _check_csrf(guarded, form):
+        return _page("Ошибка", "<p class='bad'>Недействительный CSRF-токен.</p>")
+    raw_id = form.get("user_id")
+    if not isinstance(raw_id, str) or not raw_id.isdigit() or int(raw_id) <= 0:
+        return _page("Ошибка", "<p class='bad'>Некорректный user id.</p>")
+    user_id = int(raw_id)
+    db: Database = ctx.db
+
+    def _restore() -> bool:
+        with db.transaction() as conn:
+            existing = allowlist.get(conn, user_id)
+            if existing is None or existing.active:
+                return False
+            allowlist.add(conn, user_id, label=existing.label)
+            audit.write(
+                conn,
+                actor="admin",
+                action="allowlist_restore",
+                target=str(user_id),
+                detail={"via": "admin-panel"},
+            )
+            return True
+
+    restored = await db.run(_restore)
+    if not restored:
+        return _page("Ошибка", "<p class='bad'>Запись не найдена или уже активна.</p>")
     return RedirectResponse("/admin/testers", status_code=303)
 
 
