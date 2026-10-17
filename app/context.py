@@ -110,13 +110,13 @@ class AppContext:
         planned: list[tuple[str, object]] = []
         if self.settings.enable_bot:
             if self.report_bot.has_token:
-                planned.append(("bot-worker", bot_worker.run(self)))
+                planned.append(("bot-worker", lambda: bot_worker.run(self)))
             else:
                 log.warning("bot worker disabled: REPORT_BOT_TOKEN is empty")
 
         if self.settings.enable_worker:
             if self.delivery_bot.has_token and self.settings.delivery_chat_id:
-                planned.append(("delivery-worker", delivery_worker.run(self)))
+                planned.append(("delivery-worker", lambda: delivery_worker.run(self)))
             else:
                 log.warning(
                     "delivery worker disabled: token/chat are not configured",
@@ -124,13 +124,19 @@ class AppContext:
                 )
 
         if self.settings.enable_maintenance:
-            planned.append(("maintenance", maintenance.run(self)))
+            planned.append(("maintenance", lambda: maintenance.run(self)))
 
-        for name, coro in planned:
-            self.tasks.append(asyncio.create_task(self._supervise(name, coro), name=name))
+        for name, factory in planned:
+            self.tasks.append(asyncio.create_task(self._supervise(name, factory), name=name))
 
-    async def _supervise(self, name: str, coro) -> None:
-        """Перезапускает воркер до остановки процесса, пишет состояние в реестр."""
+    async def _supervise(self, name: str, factory) -> None:
+        """Перезапускает воркер до остановки процесса, пишет состояние в реестр.
+
+        `factory` — функция, создающая НОВУЮ корутину при каждом запуске:
+        корутину Python нельзя ожидать повторно, поэтому хранить и
+        ре-await'ить готовую нельзя (RuntimeError: cannot reuse already
+        awaited coroutine) — воркеры фактически не перезапускались бы.
+        """
         entry = self._health(name)
         entry.running = True
         entry.started_at = time.time()
@@ -138,7 +144,7 @@ class AppContext:
             delay = _RESTART_BASE_SECONDS
             while not self._stopping.is_set():
                 try:
-                    await coro
+                    await factory()
                     # Нормальный выход возможен только при остановке.
                     if self._stopping.is_set():
                         break

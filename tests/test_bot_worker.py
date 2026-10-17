@@ -38,6 +38,12 @@ class FakeCtx:
 
         return asyncio.Event()
 
+    def worker_success(self, name: str) -> None:  # noqa: ARG002
+        pass
+
+    def worker_failure(self, name: str, error: str) -> None:  # noqa: ARG002
+        pass
+
 
 @pytest.fixture()
 def ctx(db, settings):
@@ -213,6 +219,97 @@ async def test_commit_offset_only_moves_forward(ctx, db, settings):
     await bot_worker._commit_offset(ctx, 10)
     await bot_worker._commit_offset(ctx, 5)
     assert await bot_worker._load_offset_db(ctx) == 11
+
+
+class FlakyBot(FakeBotClient):
+    """Первые N вызовов send_message падают временной ошибкой Bot API."""
+
+    def __init__(self, fail_times: int) -> None:
+        super().__init__()
+        self.fail_times = fail_times
+
+    async def send_message(self, chat_id, text, *, reply_to_message_id=None, disable_notification=False):
+        if self.fail_times > 0:
+            self.fail_times -= 1
+            from app.telegram import TelegramTemporaryError
+
+            raise TelegramTemporaryError("upstream 502")
+        return await super().send_message(
+            chat_id, text, reply_to_message_id=reply_to_message_id, disable_notification=disable_notification
+        )
+
+
+class BlockedBot(FakeBotClient):
+    """Пользователь заблокировал бота — постоянная ошибка."""
+
+    async def send_message(self, chat_id, text, *, reply_to_message_id=None, disable_notification=False):
+        from app.telegram import TelegramPermanentError
+
+        raise TelegramPermanentError("bot was blocked by the user")
+
+
+async def test_confirmation_retried_before_offset_commit(ctx, db, settings, monkeypatch):
+    """Временный сбой Bot API не теряет подтверждение: ретрай до коммита offset."""
+    from app.repository import kv
+    from app.security import generate_nonce
+
+    monkeypatch.setattr(bot_worker, "_REPLY_BACKOFF_SECONDS", (0.0, 0.0, 0.0))
+    flaky = FlakyBot(fail_times=1)
+    flaky_ctx = FakeCtx(db, settings, flaky)
+
+    _allow(db, 700012)
+    nonce = generate_nonce()
+    await bot_worker._handle_report_command(
+        flaky_ctx, user_id=700012, message_id=10, nonce=nonce, update_id=500
+    )
+
+    # Подтверждение доставлено со второй попытки.
+    assert len(flaky.sent) == 1
+    # И только после этого апдейт отмечен обработанным.
+    with db.transaction() as conn:
+        stored = kv.get_value(conn, kv.KEY_BOT_LAST_UPDATE)
+    assert stored == "500"
+    assert _nonce_state(db, settings, nonce) is not None
+
+
+async def test_permanent_reply_failure_still_commits(ctx, db, settings):
+    """Если пользователь заблокировал бота, не зацикливаемся: nonce выдан."""
+    from app.repository import kv
+    from app.security import generate_nonce
+
+    blocked_ctx = FakeCtx(db, settings, BlockedBot())
+
+    _allow(db, 700013)
+    nonce = generate_nonce()
+    await bot_worker._handle_report_command(
+        blocked_ctx, user_id=700013, message_id=10, nonce=nonce, update_id=600
+    )
+
+    with db.transaction() as conn:
+        stored = kv.get_value(conn, kv.KEY_BOT_LAST_UPDATE)
+    assert stored == "600", "апдейт не должен вечно переобрабатываться"
+    assert _nonce_state(db, settings, nonce) is not None
+
+
+async def test_reissue_does_not_spend_rate_limit(ctx, db, settings):
+    """Повторный /report с тем же nonce — reissue без повторного списания."""
+    from app.security import generate_nonce
+
+    _allow(db, 700014)
+    settings.rl_user_report_cmd_per_hour = 1
+
+    nonce = generate_nonce()
+    await bot_worker._handle_report_command(
+        ctx, user_id=700014, message_id=10, nonce=nonce, update_id=701
+    )
+    # Тот же nonce, новый апдейт: лимит исчерпан, но reissue проходит.
+    await bot_worker._handle_report_command(
+        ctx, user_id=700014, message_id=11, nonce=nonce, update_id=702
+    )
+
+    assert _nonce_state(db, settings, nonce) is not None
+    confirmed_replies = [s for s in ctx.report_bot.sent if "correlation_id" in s["text"]]
+    assert len(confirmed_replies) == 2, "оба раза пользователь получил подтверждение"
 
 
 @pytest.mark.parametrize(

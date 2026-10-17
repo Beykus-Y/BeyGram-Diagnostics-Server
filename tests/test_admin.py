@@ -232,3 +232,39 @@ def test_malformed_session_cookie_redirects(client):
     client.cookies.set("admin_session", "garbage-value")
     response = client.get("/admin", follow_redirects=False)
     assert response.status_code == 303
+
+
+def test_changing_admin_token_revokes_sessions(client, admin_settings):
+    """Смена ADMIN_TOKEN инвалидирует выданные ранее сессии (#15)."""
+    _login(client)
+    assert client.get("/admin", follow_redirects=False).status_code == 200
+
+    # «Смена» токена в тех же настройках (тот же процесс, тот же pepper).
+    admin_settings.admin_token = "rotated-admin-token-9876543210"
+
+    response = client.get("/admin", follow_redirects=False)
+    assert response.status_code == 303, "старая сессия должна стать недействительной"
+
+    # Повторный вход уже с новым токеном работает.
+    response = client.post(
+        "/admin/login",
+        data={"token": "rotated-admin-token-9876543210"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert client.get("/admin", follow_redirects=False).status_code == 200
+
+
+def test_old_csrf_invalid_after_token_rotation(client, admin_settings):
+    """CSRF-токены, выданные до смены ADMIN_TOKEN, тоже отклоняются."""
+    _login(client)
+    old_csrf = _csrf(client)
+
+    admin_settings.admin_token = "rotated-admin-token-9876543210"
+    client.post(
+        "/admin/login",
+        data={"token": "rotated-admin-token-9876543210"},
+        follow_redirects=False,
+    )
+    response = client.post("/admin/intake", data={"csrf": old_csrf, "action": "off"})
+    assert "CSRF" in response.text

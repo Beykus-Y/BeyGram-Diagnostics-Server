@@ -51,7 +51,15 @@ _PAGE_SIZE = 25
 
 
 def _sign(settings: Settings, purpose: str, message: str) -> str:
-    key = f"{settings.nonce_pepper}:admin:{purpose}".encode()
+    """Подпись для cookie-сессий и CSRF-токенов.
+
+    ADMIN_TOKEN входит в ключ подписи: смена токена мгновенно инвалидирует
+    все ранее выданные сессии и CSRF-токены (принудительный re-login) без
+    серверного списка отзывов.
+    """
+    key = (
+        f"{settings.nonce_pepper}:admin:{purpose}:{settings.admin_token}".encode()
+    )
     digest = hmac.new(key, message.encode("utf-8"), hashlib.sha256).digest()[:24]
     return digest.hex()
 

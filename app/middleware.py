@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import re
 import secrets
 import time
 from collections.abc import Awaitable, Callable
@@ -24,6 +25,20 @@ log = logging.getLogger(__name__)
 
 CORRELATION_HEADER = "X-Request-ID"
 
+# Внешний request id принимаем только в безопасном формате: он попадает в
+# JSON-логи и HTTP-ответы, поэтому произвольные строки (переводы строк,
+# кавычки, управляющие символы, фальшивые Authorization-заголовки) недопустимы.
+_CORRELATION_RE = re.compile(r"^[A-Za-z0-9._\-]{1,64}$")
+
+
+def _sanitize_request_id(raw: str | None) -> str | None:
+    if not raw:
+        return None
+    candidate = raw.strip()
+    if _CORRELATION_RE.match(candidate):
+        return candidate
+    return None
+
 
 class RequestContextMiddleware(BaseHTTPMiddleware):
     """Присваивает request id, пишет строку доступа и ловит необработанные ошибки.
@@ -35,7 +50,10 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
 
     async def dispatch(self, request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
-        request_id = request.headers.get(CORRELATION_HEADER) or secrets.token_hex(8)
+        # Внешний id используем только если он прошёл форматную проверку,
+        # иначе генерируем свой — в логи не должно попадать ничего кроме
+        # ограниченного безопасного алфавита.
+        request_id = _sanitize_request_id(request.headers.get(CORRELATION_HEADER)) or secrets.token_hex(8)
         request.state.request_id = request_id
         started = time.perf_counter()
         try:

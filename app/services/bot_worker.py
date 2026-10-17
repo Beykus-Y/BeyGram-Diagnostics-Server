@@ -40,6 +40,11 @@ _COMMAND_RE = re.compile(r"^/(?P<cmd>[A-Za-z0-9_]+)(?:@(?P<bot>[A-Za-z0-9_]+))?(
 # чтобы «ядовитое» сообщение не заблокировало очередь (at-least-once c limiter).
 _MAX_HANDLER_ATTEMPTS = 3
 
+# Попытки доставить подтверждение пользователю до признания апдейта
+# обработанным: потеря ответа после выдачи nonce хуже лишнего повтора.
+_REPLY_ATTEMPTS = 4
+_REPLY_BACKOFF_SECONDS = (1.0, 3.0, 6.0)
+
 MSG_CONFIRMED = (
     "Запрос подтверждён.\n"
     "correlation_id: {correlation_id}\n\n"
@@ -193,7 +198,7 @@ async def _handle_update(ctx, update: TelegramUpdate) -> None:
     user_id = update.from_id
 
     if command in {"start", "help"}:
-        await _reply(ctx, user_id, update.message_id, MSG_NEED_NONCE)
+        await _reply_with_retry(ctx, user_id, update.message_id, MSG_NEED_NONCE)
         return
 
     if command != "report":
@@ -201,7 +206,7 @@ async def _handle_update(ctx, update: TelegramUpdate) -> None:
 
     # --- /report <nonce> ---------------------------------------------------
     if not argument:
-        await _reply(ctx, user_id, update.message_id, MSG_NEED_NONCE)
+        await _reply_with_retry(ctx, user_id, update.message_id, MSG_NEED_NONCE)
         return
 
     await _handle_report_command(
@@ -220,9 +225,12 @@ async def _handle_report_command(
 
         Возвращает (outcome, correlation_id). outcome ∈
         {confirmed, duplicate, disabled, not_allowed, rate_limited, bad_nonce, conflict}.
-        Последний обработанный update_id фиксируется в той же транзакции, что и
-        списание лимитов: повторная доставка апдейта (сбой после обработки)
-        не тратит лимит второй раз.
+
+        Offset (kv) здесь НЕ коммитится: он фиксируется после доставки
+        подтверждения пользователю (см. _handle_report_command), чтобы
+        временный сбой Bot API не привёл к потере ответа. Повторная доставка
+        апдейта не тратит лимиты повторно: уже зарегистрированный живой nonce
+        уходит по пути reissue без списаний.
         """
         with db.transaction() as conn:
             stored = kv.get_value(conn, kv.KEY_BOT_LAST_UPDATE)
@@ -237,6 +245,36 @@ async def _handle_report_command(
             if not intake_enabled(conn, settings):
                 return "disabled", None
 
+            # Валидация формата ДО обращения к allowlist: мусор отсекаем рано.
+            try:
+                validated = validate_nonce(nonce)
+            except NonceFormatError:
+                return "bad_nonce", None
+
+            if not allowlist.is_active(conn, user_id):
+                # Не сообщаем, есть ли id в списке; просто отказ.
+                audit.write(conn, actor="bot", action="report_cmd_denied", target=str(user_id))
+                return "not_allowed", None
+
+            nonce_hash = hash_nonce(settings.nonce_pepper, validated.raw)
+
+            # Уже зарегистрированный живой nonce — повторное подтверждение:
+            # отвечаем снова без повторного списания лимитов.
+            existing = nonces.get(conn, nonce_hash)
+            if (
+                existing is not None
+                and existing.telegram_user_id == user_id
+                and existing.is_live
+            ):
+                audit.write(
+                    conn,
+                    actor="bot",
+                    action="nonce_reissued",
+                    target=nonce_hash[:16],
+                    detail={"telegram_user_id": user_id},
+                )
+                return "confirmed", nonce_hash[:16]
+
             # Лимиты применяются ДО регистрации, чтобы /report не был вектором спама.
             ok, _ = rate_limit.check_and_record(
                 conn,
@@ -246,7 +284,6 @@ async def _handle_report_command(
                 window_seconds=3600,
             )
             if not ok:
-                kv.set_value(conn, kv.KEY_BOT_LAST_UPDATE, str(update_id))
                 audit.write(conn, actor="bot", action="report_cmd_rate_limited", target=str(user_id))
                 return "rate_limited", None
 
@@ -258,24 +295,9 @@ async def _handle_report_command(
                 window_seconds=3600,
             )
             if not ok:
-                kv.set_value(conn, kv.KEY_BOT_LAST_UPDATE, str(update_id))
                 audit.write(conn, actor="bot", action="report_cmd_global_rate_limited")
                 return "rate_limited", None
 
-            # Валидация формата ДО обращения к allowlist: мусор отсекаем рано.
-            try:
-                validated = validate_nonce(nonce)
-            except NonceFormatError:
-                kv.set_value(conn, kv.KEY_BOT_LAST_UPDATE, str(update_id))
-                return "bad_nonce", None
-
-            if not allowlist.is_active(conn, user_id):
-                # Не сообщаем, есть ли id в списке; просто отказ.
-                kv.set_value(conn, kv.KEY_BOT_LAST_UPDATE, str(update_id))
-                audit.write(conn, actor="bot", action="report_cmd_denied", target=str(user_id))
-                return "not_allowed", None
-
-            nonce_hash = hash_nonce(settings.nonce_pepper, validated.raw)
             try:
                 record, created = nonces.register_issued(
                     conn,
@@ -284,7 +306,6 @@ async def _handle_report_command(
                     ttl_seconds=settings.nonce_ttl_seconds,
                 )
             except nonces.NonceConflictError:
-                kv.set_value(conn, kv.KEY_BOT_LAST_UPDATE, str(update_id))
                 audit.write(
                     conn,
                     actor="bot",
@@ -293,7 +314,6 @@ async def _handle_report_command(
                 )
                 return "conflict", None
 
-            kv.set_value(conn, kv.KEY_BOT_LAST_UPDATE, str(update_id))
             correlation_id = nonce_hash[:16]
             audit.write(
                 conn,
@@ -322,21 +342,55 @@ async def _handle_report_command(
         "conflict": MSG_BAD_NONCE,
     }
     text = messages.get(outcome, MSG_NEED_NONCE)
-    # Подтверждение отправляем отдельным сообщением, не скрывая действие.
-    await _reply(ctx, user_id, message_id, text)
 
+    # Подтверждение доставляем до фиксации апдейта: если Bot API временно
+    # недоступен, ретраим; апдейт останется неподтверждённым и придёт снова.
+    delivered = await _reply_with_retry(ctx, user_id, message_id, text)
+    if not delivered:
+        # Постоянная неудача (например, пользователь заблокировал бота).
+        # Nonce уже выдан и действителен; отметим апдейт обработанным, чтобы
+        # не зациклиться. Пользователь может повторить /report — подтверждение
+        # придёт заново (reissue без списания лимитов).
+        log.error(
+            "confirmation could not be delivered after retries",
+            extra={"update_id": update_id, "outcome": outcome, "telegram_user_id": user_id},
+        )
+
+    await _commit_offset(ctx, update_id)
+    ctx.worker_success("bot-worker")
     log.info(
         "report command handled",
-        extra={"outcome": outcome, "telegram_user_id": user_id},
+        extra={"outcome": outcome, "telegram_user_id": user_id, "confirmed_reply": delivered},
     )
 
 
-async def _reply(ctx, chat_id: int, reply_to: int | None, text: str) -> None:
-    try:
-        await ctx.report_bot.send_message(chat_id, text, reply_to_message_id=reply_to)
-    except TelegramError as exc:
-        # Пользователь мог заблокировать бота — это нормальная ситуация, не ошибка сервера.
-        log.warning("cannot reply to user: %s", exc.__class__.__name__)
+async def _reply_with_retry(ctx, chat_id: int, reply_to: int | None, text: str) -> bool:
+    """Доставляет сообщение пользователю с ретраями на временных сбоях.
+
+    Возвращает True, если Bot API подтвердил отправку.
+    """
+    import asyncio
+
+    for attempt in range(_REPLY_ATTEMPTS):
+        try:
+            await ctx.report_bot.send_message(chat_id, text, reply_to_message_id=reply_to)
+            return True
+        except TelegramPermanentError as exc:
+            # Блокировка бота/невалидный чат: ретраить бессмысленно.
+            log.warning(
+                "cannot reply to user: %s", exc.__class__.__name__
+            )
+            return False
+        except TelegramError as exc:
+            if attempt >= _REPLY_ATTEMPTS - 1:
+                log.warning(
+                    "reply failed after %d attempts: %s",
+                    _REPLY_ATTEMPTS,
+                    exc.__class__.__name__,
+                )
+                return False
+            await asyncio.sleep(_REPLY_BACKOFF_SECONDS[min(attempt, len(_REPLY_BACKOFF_SECONDS) - 1)])
+    return False  # pragma: no cover - недостижимо при корректном цикле
 
 
 def _parse_command(text: str) -> tuple[str, str] | None:
