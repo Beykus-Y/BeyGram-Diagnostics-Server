@@ -15,6 +15,7 @@ import asyncio
 import contextlib
 import logging
 
+from ..admin_sessions import prune_expired as prune_expired_sessions
 from ..config import Settings
 from ..db import Database
 from ..repository import audit, nonces, rate_limit, reports
@@ -64,6 +65,7 @@ async def _tick(ctx, settings: Settings, *, last_checkpoint: float) -> float:
                 conn, keep_seconds=settings.audit_retention_days * 86400, at=ts
             )
             removed_rate = rate_limit.prune(conn, keep_seconds=_RATE_KEEP_SECONDS, at=ts)
+            removed_sessions = prune_expired_sessions(conn, at=ts)
             return {
                 "expired_nonces": expired,
                 "removed_nonces": removed_nonces,
@@ -71,6 +73,7 @@ async def _tick(ctx, settings: Settings, *, last_checkpoint: float) -> float:
                 "removed_reports": removed_reports,
                 "removed_audit": removed_audit,
                 "removed_rate_events": removed_rate,
+                "removed_admin_sessions": removed_sessions,
                 "queue_depth": reports.queue_depth(conn),
                 "queue": reports.queue_stats(conn),
                 "nonce_states": nonces.count_by_state(conn),

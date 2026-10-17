@@ -96,6 +96,25 @@ def test_reissue_same_nonce_is_idempotent(db):
         assert created_second is False
 
 
+def test_expired_issued_nonce_is_not_usable(db):
+    """ISSUED с прошедшим TTL: is_live остаётся True, is_usable — False (#17)."""
+    with db.transaction() as conn:
+        nonces.register_issued(
+            conn, nonce_hash=_hash(50), telegram_user_id=100, ttl_seconds=60, at=1000.0
+        )
+        record = nonces.get(conn, _hash(50))
+        assert record.is_live is True
+        assert record.is_usable(at=1000.0 + 30) is True
+        assert record.is_usable(at=1000.0 + 61) is False
+
+        # Повторная регистрация просроченного nonce отклоняется, даже если
+        # maintenance ещё не пометил его EXPIRED.
+        with pytest.raises(nonces.NonceConflictError):
+            nonces.register_issued(
+                conn, nonce_hash=_hash(50), telegram_user_id=100, ttl_seconds=300, at=1000.0 + 61
+            )
+
+
 def test_reuse_after_consumption_rejected(db):
     with db.transaction() as conn:
         nonces.register_issued(conn, nonce_hash=_hash(6), telegram_user_id=100, ttl_seconds=300)

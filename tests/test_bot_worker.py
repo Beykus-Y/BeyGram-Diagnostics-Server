@@ -312,6 +312,98 @@ async def test_reissue_does_not_spend_rate_limit(ctx, db, settings):
     assert len(confirmed_replies) == 2, "оба раза пользователь получил подтверждение"
 
 
+class AlwaysFailsBot(FakeBotClient):
+    """Постоянные временные сбои Bot API (упавший Telegram)."""
+
+    async def send_message(self, chat_id, text, *, reply_to_message_id=None, disable_notification=False):
+        from app.telegram import TelegramTemporaryError
+
+        raise TelegramTemporaryError("upstream 502")
+
+
+async def test_reply_failure_leaves_update_unacknowledged(ctx, db, settings, monkeypatch):
+    """Временный сбой: апдейт НЕ фиксируется — ответ будет отправлен снова."""
+    from app.repository import kv
+    from app.security import generate_nonce
+
+    monkeypatch.setattr(bot_worker, "_REPLY_BACKOFF_SECONDS", (0.0, 0.0, 0.0))
+    failing_ctx = FakeCtx(db, settings, AlwaysFailsBot())
+
+    _allow(db, 700015)
+    nonce = generate_nonce()
+    processed = await bot_worker._handle_report_command(
+        failing_ctx, user_id=700015, message_id=10, nonce=nonce, update_id=800
+    )
+
+    assert processed is False, "при недоставленном подтверждении апдейт не фиксируется"
+    with db.transaction() as conn:
+        assert kv.get_value(conn, kv.KEY_BOT_LAST_UPDATE) is None
+
+
+async def test_reply_recovered_when_telegram_returns(ctx, db, settings, monkeypatch):
+    """После восстановления Bot API подтверждение доставляется автоматически.
+
+    Апдейт переобрабатывается (offset не был зафиксирован), лимит НЕ тратится
+    повторно (reissue), пользователь получает подтверждение.
+    """
+    from app.repository import kv
+    from app.security import generate_nonce
+
+    monkeypatch.setattr(bot_worker, "_REPLY_BACKOFF_SECONDS", (0.0, 0.0, 0.0))
+    _allow(db, 700016)
+    settings.rl_user_report_cmd_per_hour = 1
+
+    nonce = generate_nonce()
+    # Шаг 1: Telegram лежит — подтверждение не ушло, апдейт не зафиксирован.
+    down_ctx = FakeCtx(db, settings, AlwaysFailsBot())
+    processed = await bot_worker._handle_report_command(
+        down_ctx, user_id=700016, message_id=10, nonce=nonce, update_id=900
+    )
+    assert processed is False
+
+    # Шаг 2: Telegram восстановился — тот же апдейт обрабатывается заново.
+    recovered_ctx = FakeCtx(db, settings, FakeBotClient())
+    processed = await bot_worker._handle_report_command(
+        recovered_ctx, user_id=700016, message_id=10, nonce=nonce, update_id=900
+    )
+    assert processed is True
+    assert len(recovered_ctx.report_bot.sent) == 1, "подтверждение доставлено"
+    assert "correlation_id" in recovered_ctx.report_bot.sent[0]["text"]
+
+    with db.transaction() as conn:
+        assert kv.get_value(conn, kv.KEY_BOT_LAST_UPDATE) == "900"
+
+
+async def test_expired_nonce_not_reconfirmed(ctx, db, settings):
+    """Просроченный (но ещё ISSUED до maintenance) nonce не подтверждается (#17)."""
+    from app.security import generate_nonce
+
+    _allow(db, 700017)
+    nonce = generate_nonce()
+    # Первая выдача — валидна.
+    await bot_worker._handle_report_command(
+        ctx, user_id=700017, message_id=10, nonce=nonce, update_id=910
+    )
+
+    # Симулируем прошедший TTL без ожидания maintenance.
+    with db.transaction() as conn:
+        conn.execute("UPDATE nonces SET expires_at = 1 WHERE telegram_user_id = 700017")
+
+    sent_before = len(ctx.report_bot.sent)
+    processed = await bot_worker._handle_report_command(
+        ctx, user_id=700017, message_id=11, nonce=nonce, update_id=911
+    )
+
+    # Пользователь НЕ получает нового «Запрос подтверждён».
+    assert processed is True
+    new_replies = ctx.report_bot.sent[sent_before:]
+    assert not any("correlation_id" in s["text"] for s in new_replies), (
+        "просроченный nonce нельзя подтверждать заново"
+    )
+    # Ответ об отказе приходит (nonce уже бесполезен — цикл перезапуска завершён).
+    assert any("неверный формат" in s["text"] for s in new_replies)
+
+
 @pytest.mark.parametrize(
     ("text", "expected"),
     [

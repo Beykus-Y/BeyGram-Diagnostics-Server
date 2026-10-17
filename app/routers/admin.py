@@ -21,8 +21,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import html
 import json
 import logging
@@ -31,18 +29,17 @@ from typing import Any
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
+from .. import admin_sessions
 from ..config import Settings
 from ..db import Database
 from ..repository import allowlist, audit, nonces, rate_limit, reports
 from ..security import constant_time_equals, hash_ip
 from ..services.settings_service import intake_enabled, set_intake_enabled
-from ..util import now
 
 log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
-ADMIN_COOKIE = "admin_session"
 _SCOPE_ADMIN_LOGIN = "admin_login"
 _PAGE_SIZE = 25
 
@@ -50,53 +47,18 @@ _PAGE_SIZE = 25
 # --- Подписи и сессии -------------------------------------------------------
 
 
-def _sign(settings: Settings, purpose: str, message: str) -> str:
-    """Подпись для cookie-сессий и CSRF-токенов.
-
-    ADMIN_TOKEN входит в ключ подписи: смена токена мгновенно инвалидирует
-    все ранее выданные сессии и CSRF-токены (принудительный re-login) без
-    серверного списка отзывов.
-    """
-    key = (
-        f"{settings.nonce_pepper}:admin:{purpose}:{settings.admin_token}".encode()
-    )
-    digest = hmac.new(key, message.encode("utf-8"), hashlib.sha256).digest()[:24]
-    return digest.hex()
+# --- Сессии (см. app/admin_sessions.py) -------------------------------------
 
 
-def _make_session(settings: Settings) -> tuple[str, str]:
-    """Возвращает (значение cookie, csrf-токен); оба привязаны к сроку сессии."""
-    payload = str(int(now() + settings.admin_session_ttl_seconds))
-    cookie = f"{payload}.{_sign(settings, 'session', payload)}"
-    return cookie, _sign(settings, "csrf", payload)
-
-
-def _read_session(settings: Settings, request: Request) -> tuple[float, str] | None:
-    """Разбирает cookie; возвращает (expires_at, csrf) или None."""
-    raw = request.cookies.get(ADMIN_COOKIE)
-    if not raw or "." not in raw:
-        return None
-    payload, signature = raw.rsplit(".", 1)
-    if not constant_time_equals(_sign(settings, "session", payload), signature):
-        return None
-    try:
-        expires = float(payload)
-    except ValueError:
-        return None
-    if expires < now():
-        return None
-    return expires, _sign(settings, "csrf", payload)
-
-
-def _guard(request: Request, settings: Settings) -> tuple[float, str] | Response:
+def _guard(request: Request, settings: Settings, session) -> tuple[float, str] | Response:
     """Проверяет доступ: панель включена и сессия действительна.
 
-    Возвращает сессию либо готовый Response (404 при выключенной панели,
-    редирект на логин), который обработчик должен вернуть как есть.
+    `session` — результат read_session (считается обработчиком через db.run,
+    поскольку реестр сессий живёт в БД). Возвращает сессию либо готовый
+    Response (404 при выключенной панели, редирект на логин).
     """
     if not settings.admin_token:
         return _not_found()
-    session = _read_session(settings, request)
     if session is None:
         return RedirectResponse("/admin/login", status_code=303)
     return session
@@ -189,10 +151,16 @@ def _status_badge(status: str) -> str:
 
 @router.get("/login")
 async def login_page(request: Request) -> Response:
-    settings: Settings = request.app.state.context.settings
+    ctx = request.app.state.context
+    settings: Settings = ctx.settings
     if not settings.admin_token:
         return _not_found()
-    if _read_session(settings, request) is not None:
+    session = await ctx.db.run(
+        lambda: admin_sessions.read_session(
+            ctx.db.connection, settings, request.cookies.get(admin_sessions.COOKIE_NAME)
+        )
+    )
+    if session is not None:
         return RedirectResponse("/admin", status_code=303)
     return _page(
         "Вход",
@@ -248,11 +216,19 @@ async def login(request: Request) -> Response:
             headers=_secure_headers(),
         )
 
-    cookie, _ = _make_session(settings)
+    async def _create_session() -> str:
+        # Замыкание: создаёт запись сессии в реестре в короткой транзакции.
+        def _do() -> str:
+            cookie, _ = admin_sessions.create_session(db.connection, settings)
+            return cookie
+
+        return await db.run(_do)
+
+    cookie = await _create_session()
     await db.run(lambda: _audit(db, "admin_login", {}))
     response = RedirectResponse("/admin", status_code=303)
     response.set_cookie(
-        ADMIN_COOKIE,
+        admin_sessions.COOKIE_NAME,
         cookie,
         max_age=settings.admin_session_ttl_seconds,
         httponly=True,
@@ -265,14 +241,36 @@ async def login(request: Request) -> Response:
 
 @router.post("/logout")
 async def logout(request: Request) -> Response:
+    """Выход: сессия отзывается на сервере, а не только в браузере.
+
+    Сохранённая копия cookie после logout становится недействительной:
+    реестр сессий больше не содержит её id.
+    """
+    ctx = request.app.state.context
+    cookie_value = request.cookies.get(admin_sessions.COOKIE_NAME)
+    if cookie_value:
+        await ctx.db.run(
+            lambda: admin_sessions.revoke_session(ctx.db.connection, cookie_value)
+        )
     response = RedirectResponse("/admin/login", status_code=303)
-    response.delete_cookie(ADMIN_COOKIE, path="/admin")
+    response.delete_cookie(admin_sessions.COOKIE_NAME, path="/admin")
     return response
 
 
 def _audit(db: Database, action: str, detail: dict[str, Any]) -> None:
     with db.transaction() as conn:
         audit.write(conn, actor="admin", action=action, detail=detail or None)
+
+
+async def _session(ctx, request: Request) -> tuple[float, str] | None:
+    """Читает сессию из серверного реестра (в БД)."""
+    return await ctx.db.run(
+        lambda: admin_sessions.read_session(
+            ctx.db.connection,
+            ctx.settings,
+            request.cookies.get(admin_sessions.COOKIE_NAME),
+        )
+    )
 
 
 # --- Обзор ------------------------------------------------------------------
@@ -283,7 +281,7 @@ def _audit(db: Database, action: str, detail: dict[str, Any]) -> None:
 async def overview(request: Request) -> Response:
     ctx = request.app.state.context
     settings: Settings = ctx.settings
-    guarded = _guard(request, settings)
+    guarded = _guard(request, settings, await _session(ctx, request))
     if isinstance(guarded, Response):
         return guarded
     db: Database = ctx.db
@@ -349,7 +347,7 @@ async def overview(request: Request) -> Response:
 async def reports_page(request: Request, q: str = "", status: str = "", page: int = 1) -> Response:
     ctx = request.app.state.context
     settings: Settings = ctx.settings
-    guarded = _guard(request, settings)
+    guarded = _guard(request, settings, await _session(ctx, request))
     if isinstance(guarded, Response):
         return guarded
     db: Database = ctx.db
@@ -431,7 +429,7 @@ async def reports_page(request: Request, q: str = "", status: str = "", page: in
 async def report_detail(request: Request, report_id: str, severity: str = "", kind: str = "") -> Response:
     ctx = request.app.state.context
     settings: Settings = ctx.settings
-    guarded = _guard(request, settings)
+    guarded = _guard(request, settings, await _session(ctx, request))
     if isinstance(guarded, Response):
         return guarded
     db: Database = ctx.db
@@ -499,7 +497,7 @@ async def report_detail(request: Request, report_id: str, severity: str = "", ki
 async def retry_report(request: Request, report_id: str) -> Response:
     ctx = request.app.state.context
     settings: Settings = ctx.settings
-    guarded = _guard(request, settings)
+    guarded = _guard(request, settings, await _session(ctx, request))
     if isinstance(guarded, Response):
         return guarded
     db: Database = ctx.db
@@ -529,7 +527,7 @@ async def retry_report(request: Request, report_id: str) -> Response:
 async def export_report(request: Request, report_id: str) -> Response:
     ctx = request.app.state.context
     settings: Settings = ctx.settings
-    guarded = _guard(request, settings)
+    guarded = _guard(request, settings, await _session(ctx, request))
     if isinstance(guarded, Response):
         return guarded
     db: Database = ctx.db
@@ -572,7 +570,7 @@ async def export_report(request: Request, report_id: str) -> Response:
 async def testers_page(request: Request) -> Response:
     ctx = request.app.state.context
     settings: Settings = ctx.settings
-    guarded = _guard(request, settings)
+    guarded = _guard(request, settings, await _session(ctx, request))
     if isinstance(guarded, Response):
         return guarded
     db: Database = ctx.db
@@ -618,7 +616,7 @@ async def testers_page(request: Request) -> Response:
 async def testers_add(request: Request) -> Response:
     ctx = request.app.state.context
     settings: Settings = ctx.settings
-    guarded = _guard(request, settings)
+    guarded = _guard(request, settings, await _session(ctx, request))
     if isinstance(guarded, Response):
         return guarded
     db: Database = ctx.db
@@ -650,7 +648,7 @@ async def testers_add(request: Request) -> Response:
 async def testers_revoke(request: Request) -> Response:
     ctx = request.app.state.context
     settings: Settings = ctx.settings
-    guarded = _guard(request, settings)
+    guarded = _guard(request, settings, await _session(ctx, request))
     if isinstance(guarded, Response):
         return guarded
     db: Database = ctx.db
@@ -693,7 +691,7 @@ async def testers_revoke(request: Request) -> Response:
 async def intake_toggle(request: Request) -> Response:
     ctx = request.app.state.context
     settings: Settings = ctx.settings
-    guarded = _guard(request, settings)
+    guarded = _guard(request, settings, await _session(ctx, request))
     if isinstance(guarded, Response):
         return guarded
     db: Database = ctx.db
@@ -724,7 +722,7 @@ async def intake_toggle(request: Request) -> Response:
 async def audit_page(request: Request) -> Response:
     ctx = request.app.state.context
     settings: Settings = ctx.settings
-    guarded = _guard(request, settings)
+    guarded = _guard(request, settings, await _session(ctx, request))
     if isinstance(guarded, Response):
         return guarded
     db: Database = ctx.db

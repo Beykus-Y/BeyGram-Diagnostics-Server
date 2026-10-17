@@ -123,7 +123,7 @@ async def run(ctx) -> None:
             if offset is not None and update.update_id < offset:
                 continue  # уже обработан в прошлый раз (защита от повторов)
             try:
-                await _handle_update(ctx, update)
+                processed = await _handle_update(ctx, update)
             except Exception:  # noqa: BLE001 - один плохой апдейт не должен ронять цикл
                 failures[update.update_id] = failures.get(update.update_id, 0) + 1
                 log.exception(
@@ -138,11 +138,22 @@ async def run(ctx) -> None:
                     "update skipped after repeated failures",
                     extra={"update_id": update.update_id},
                 )
-            # Апдейт обработан (или пропущен после _MAX_HANDLER_ATTEMPTS).
-            await _commit_offset(ctx, update.update_id)
-            offset = update.update_id + 1
-            failures.pop(update.update_id, None)
-            ctx.worker_success("bot-worker")
+                processed = True  # пропустили после _MAX_HANDLER_ATTEMPTS
+
+            if processed:
+                # Апдейт полностью обработан (ответ доставлен либо ретраить
+                # бессмысленно) — фиксируем offset.
+                await _commit_offset(ctx, update.update_id)
+                offset = update.update_id + 1
+                failures.pop(update.update_id, None)
+                ctx.worker_success("bot-worker")
+            else:
+                # Подтверждение не доставлено (временный сбой Bot API):
+                # апдейт остаётся неподтверждённым и придёт снова — ответ
+                # будет отправлен при восстановлении Bot API.
+                offset = update.update_id
+                await _sleep(ctx, settings.bot_poll_interval_seconds)
+                break
 
         if not updates:
             await _sleep(ctx, settings.bot_poll_interval_seconds)
@@ -180,43 +191,47 @@ async def _commit_offset(ctx, update_id: int) -> None:
     await db.run(_write)
 
 
-async def _handle_update(ctx, update: TelegramUpdate) -> None:
+async def _handle_update(ctx, update: TelegramUpdate) -> bool:
+    """Обрабатывает апдейт. Возвращает True, если он полностью обработан.
+
+    False означает «ответ пользователю не доставлен из-за временного сбоя
+    Bot API»: апдейт не фиксируется и придёт снова при восстановлении.
+    """
     # Игнорируем апдейты без отправителя (каналы, служебное) и сообщения от ботов.
     if update.from_id is None or update.from_is_bot:
-        return
+        return True
 
     # Доверяем только приватному чату: пользователь должен писать боту лично.
     if update.chat_type not in (None, "private"):
         log.info("ignoring non-private message", extra={"chat_type": update.chat_type})
-        return
+        return True
 
     parsed = _parse_command(update.text)
     if parsed is None:
-        return
+        return True
     command, argument = parsed
 
     user_id = update.from_id
 
     if command in {"start", "help"}:
-        await _reply_with_retry(ctx, user_id, update.message_id, MSG_NEED_NONCE)
-        return
+        return (await _reply_with_retry(ctx, user_id, update.message_id, MSG_NEED_NONCE)) != _REPLY_TEMPORARY
 
     if command != "report":
-        return
+        return True
 
     # --- /report <nonce> ---------------------------------------------------
     if not argument:
-        await _reply_with_retry(ctx, user_id, update.message_id, MSG_NEED_NONCE)
-        return
+        return (await _reply_with_retry(ctx, user_id, update.message_id, MSG_NEED_NONCE)) != _REPLY_TEMPORARY
 
-    await _handle_report_command(
+    return await _handle_report_command(
         ctx, user_id=user_id, message_id=update.message_id, nonce=argument, update_id=update.update_id
     )
 
 
 async def _handle_report_command(
     ctx, *, user_id: int, message_id: int | None, nonce: str, update_id: int
-) -> None:
+) -> bool:
+    """Обрабатывает /report. True — апдейт можно фиксировать, False — повторить."""
     settings: Settings = ctx.settings
     db: Database = ctx.db
 
@@ -258,13 +273,15 @@ async def _handle_report_command(
 
             nonce_hash = hash_nonce(settings.nonce_pepper, validated.raw)
 
-            # Уже зарегистрированный живой nonce — повторное подтверждение:
-            # отвечаем снова без повторного списания лимитов.
+            # Уже зарегистрированный живой и НЕистёкший nonce — повторное
+            # подтверждение: отвечаем снова без повторного списания лимитов.
+            # is_usable (в отличие от is_live) проверяет expires_at, поэтому
+            # бот не подтвердит токен, который API уже отвергнет по TTL.
             existing = nonces.get(conn, nonce_hash)
             if (
                 existing is not None
                 and existing.telegram_user_id == user_id
-                and existing.is_live
+                and existing.is_usable()
             ):
                 audit.write(
                     conn,
@@ -328,7 +345,7 @@ async def _handle_report_command(
     if outcome == "duplicate":
         # Уже обработано ранее: ничего не отвечаем и не списываем лимиты.
         log.info("duplicate update skipped", extra={"update_id": update_id})
-        return
+        return True
 
     messages = {
         "confirmed": MSG_CONFIRMED.format(
@@ -344,43 +361,62 @@ async def _handle_report_command(
     text = messages.get(outcome, MSG_NEED_NONCE)
 
     # Подтверждение доставляем до фиксации апдейта: если Bot API временно
-    # недоступен, ретраим; апдейт останется неподтверждённым и придёт снова.
-    delivered = await _reply_with_retry(ctx, user_id, message_id, text)
-    if not delivered:
+    # недоступен, ретраим; при неудаче апдейт останется неподтверждённым
+    # и придёт снова (reissue без повторного списания лимитов).
+    reply_result = await _reply_with_retry(ctx, user_id, message_id, text)
+    if reply_result == _REPLY_PERMANENT:
         # Постоянная неудача (например, пользователь заблокировал бота).
         # Nonce уже выдан и действителен; отметим апдейт обработанным, чтобы
         # не зациклиться. Пользователь может повторить /report — подтверждение
         # придёт заново (reissue без списания лимитов).
         log.error(
-            "confirmation could not be delivered after retries",
+            "confirmation could not be delivered (permanent)",
             extra={"update_id": update_id, "outcome": outcome, "telegram_user_id": user_id},
         )
+
+    if reply_result == _REPLY_TEMPORARY:
+        # Временный сбой: НЕ фиксируем апдейт — он будет доставлен снова,
+        # и подтверждение уйдёт пользователю автоматически.
+        log.warning(
+            "confirmation delivery deferred; update left unacknowledged",
+            extra={"update_id": update_id, "outcome": outcome, "telegram_user_id": user_id},
+        )
+        return False
 
     await _commit_offset(ctx, update_id)
     ctx.worker_success("bot-worker")
     log.info(
         "report command handled",
-        extra={"outcome": outcome, "telegram_user_id": user_id, "confirmed_reply": delivered},
+        extra={
+            "outcome": outcome,
+            "telegram_user_id": user_id,
+            "reply": reply_result,
+        },
     )
+    return True
 
 
-async def _reply_with_retry(ctx, chat_id: int, reply_to: int | None, text: str) -> bool:
+# Результат доставки сообщения пользователю.
+_REPLY_DELIVERED = "delivered"  # Bot API подтвердил отправку
+_REPLY_PERMANENT = "permanent"  # ретрай бессмысленен (бот заблокирован и т.п.)
+_REPLY_TEMPORARY = "temporary"  # временный сбой — стоит доставить повторно
+
+
+async def _reply_with_retry(ctx, chat_id: int, reply_to: int | None, text: str) -> str:
     """Доставляет сообщение пользователю с ретраями на временных сбоях.
 
-    Возвращает True, если Bot API подтвердил отправку.
+    Возвращает _REPLY_DELIVERED / _REPLY_PERMANENT / _REPLY_TEMPORARY.
     """
     import asyncio
 
     for attempt in range(_REPLY_ATTEMPTS):
         try:
             await ctx.report_bot.send_message(chat_id, text, reply_to_message_id=reply_to)
-            return True
+            return _REPLY_DELIVERED
         except TelegramPermanentError as exc:
             # Блокировка бота/невалидный чат: ретраить бессмысленно.
-            log.warning(
-                "cannot reply to user: %s", exc.__class__.__name__
-            )
-            return False
+            log.warning("cannot reply to user: %s", exc.__class__.__name__)
+            return _REPLY_PERMANENT
         except TelegramError as exc:
             if attempt >= _REPLY_ATTEMPTS - 1:
                 log.warning(
@@ -388,9 +424,9 @@ async def _reply_with_retry(ctx, chat_id: int, reply_to: int | None, text: str) 
                     _REPLY_ATTEMPTS,
                     exc.__class__.__name__,
                 )
-                return False
+                return _REPLY_TEMPORARY
             await asyncio.sleep(_REPLY_BACKOFF_SECONDS[min(attempt, len(_REPLY_BACKOFF_SECONDS) - 1)])
-    return False  # pragma: no cover - недостижимо при корректном цикле
+    return _REPLY_TEMPORARY  # pragma: no cover - недостижимо при корректном цикле
 
 
 def _parse_command(text: str) -> tuple[str, str] | None:

@@ -51,7 +51,18 @@ class NonceRecord:
 
     @property
     def is_live(self) -> bool:
+        """Состояние живое (не терминальное). НЕ учитывает срок годности."""
         return self.state in {NONCE_ISSUED, NONCE_PROCESSING, NONCE_ACCEPTED}
+
+    def is_usable(self, at: float | None = None) -> bool:
+        """Живой И не истёкший nonce — только такой стоит подтверждать/принимать.
+
+        ISSUED-запись с прошедшим TTL выглядит живой до ближайшего тика
+        maintenance (до 15 минут), но API уже отклонит её как просроченную;
+        бот не должен выдавать за неё подтверждение.
+        """
+        ts = at if at is not None else now()
+        return self.is_live and self.expires_at > ts
 
 
 def _select(conn: sqlite3.Connection, where: str, params: tuple) -> NonceRecord | None:
@@ -89,9 +100,10 @@ def register_issued(
     if existing is not None:
         if existing.telegram_user_id != telegram_user_id:
             raise NonceConflictError("nonce hash already registered to another user")
-        if existing.is_live:
+        if existing.is_usable(ts):
             return existing, False
-        # Просроченный/погашенный/отозванный nonce переиспользовать нельзя.
+        # Просроченный (даже ещё не помеченный maintenance) / погашенный /
+        # отозванный nonce переиспользовать нельзя.
         raise NonceConflictError("nonce already consumed")
 
     conn.execute(

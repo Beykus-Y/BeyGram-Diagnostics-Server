@@ -31,3 +31,9 @@ def get_bool(conn: sqlite3.Connection, key: str, default: bool) -> bool:
     if value is None:
         return default
     return value.lower() in {"1", "true", "yes", "on"}
+
+
+def delete(conn: sqlite3.Connection, key: str) -> bool:
+    """Удаляет ключ. Возвращает True, если ключ существовал."""
+    cur = conn.execute("DELETE FROM kv WHERE key = ?", (key,))
+    return cur.rowcount > 0

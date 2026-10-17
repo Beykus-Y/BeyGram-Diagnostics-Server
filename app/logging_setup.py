@@ -33,17 +33,17 @@ def redact(text: str) -> str:
 
 
 class RedactingFilter(logging.Filter):
-    """Вычищает токены из сообщений и аргументов записи."""
+    """Вычищает токены из сообщений записи.
+
+    Сообщение форматируется ЗАРАНЕЕ (getMessage) и args сбрасываются:
+    редактрование превращает аргументы в строки, и ленивое %-форматирование
+    (%d и т.п.) падало бы TypeError при последующем рендере записи.
+    """
 
     def filter(self, record: logging.LogRecord) -> bool:  # noqa: A003
         try:
-            if isinstance(record.msg, str) and record.msg:
-                record.msg = redact(record.msg)
-            if record.args:
-                if isinstance(record.args, dict):
-                    record.args = {k: redact(str(v)) for k, v in record.args.items()}
-                else:
-                    record.args = tuple(redact(str(a)) for a in record.args)
+            record.msg = redact(record.getMessage())
+            record.args = None
         except Exception:  # pragma: no cover - логирование не должно ломать запрос
             pass
         return True

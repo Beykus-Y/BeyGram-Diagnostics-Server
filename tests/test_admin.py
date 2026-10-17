@@ -268,3 +268,103 @@ def test_old_csrf_invalid_after_token_rotation(client, admin_settings):
     )
     response = client.post("/admin/intake", data={"csrf": old_csrf, "action": "off"})
     assert "CSRF" in response.text
+
+
+# --- Серверный реестр сессий (#18) ------------------------------------------
+
+
+def _cookie_value(client) -> str:
+    value = client.cookies.get("admin_session")
+    assert value, "после логина cookie должна существовать"
+    return value
+
+
+def test_each_login_creates_unique_session(client):
+    """Сессии, созданные в одну секунду, имеют разные cookie (#18)."""
+    first = _cookie_value_after_login(client)
+    second = _cookie_value_after_login(client)
+    assert first != second, "cookie сессии должны быть уникальны"
+
+
+def _cookie_value_after_login(client) -> str:
+    client.post("/admin/login", data={"token": ADMIN_TOKEN}, follow_redirects=False)
+    return _cookie_value(client)
+
+
+def test_logout_revokes_session_server_side(client):
+    """Сохранённая копия cookie после logout недействительна (#18)."""
+    _login(client)
+    saved_cookie = _cookie_value(client)
+
+    client.post("/admin/logout", follow_redirects=False)
+    assert "admin_session" not in client.cookies
+
+    # Воспроизводим сохранённую копию cookie: доступ должен быть закрыт.
+    client.cookies.set("admin_session", saved_cookie)
+    response = client.get("/admin", follow_redirects=False)
+    assert response.status_code == 303, "отозванная сессия не должна работать"
+
+
+def test_replayed_cookie_without_logout_still_works(client):
+    """Без logout сохранённая cookie работает (регрессия на #18)."""
+    _login(client)
+    saved_cookie = _cookie_value(client)
+
+    client.cookies.clear()
+    client.cookies.set("admin_session", saved_cookie)
+    response = client.get("/admin", follow_redirects=False)
+    assert response.status_code == 200
+
+
+def test_expired_session_pruned_from_registry(db, admin_settings):
+    """prune_expired удаляет просроченные записи; read_session их отвергает."""
+    from app import admin_sessions
+
+    with db.transaction() as conn:
+        cookie, _ = admin_sessions.create_session(conn, admin_settings)
+        # Сессия ещё жива — читается.
+        assert admin_sessions.read_session(conn, admin_settings, cookie) is not None
+
+    with db.transaction() as conn:
+        # Симулируем прошедший срок.
+        conn.execute("UPDATE kv SET value = '1' WHERE key LIKE 'admin_session:%'")
+        assert admin_sessions.read_session(conn, admin_settings, cookie) is None
+        removed = admin_sessions.prune_expired(conn)
+        assert removed == 1
+        # Повторная чистка — нечего удалять.
+        assert admin_sessions.prune_expired(conn) == 0
+
+
+def test_maintenance_prunes_sessions(db, settings):
+    """maintenance._tick подчищает просроченные админ-сессии."""
+    import asyncio
+
+    from app import admin_sessions
+    from app.services import maintenance
+
+    class FakeCtx:
+        def __init__(self, db, settings):
+            self.db = db
+            self.settings = settings
+            import asyncio
+
+            self.stopping = asyncio.Event()
+
+        def worker_success(self, name):  # noqa: ARG002
+            pass
+
+        def worker_failure(self, name, error):  # noqa: ARG002
+            pass
+
+    with db.transaction() as conn:
+        admin_sessions.create_session(conn, settings)
+        conn.execute("UPDATE kv SET value = '1' WHERE key LIKE 'admin_session:%'")
+
+    ctx = FakeCtx(db, settings)
+    asyncio.run(maintenance._tick(ctx, settings, last_checkpoint=0.0))
+
+    with db.transaction() as conn:
+        remaining = conn.execute(
+            "SELECT COUNT(*) AS c FROM kv WHERE key LIKE 'admin_session:%'"
+        ).fetchone()
+    assert remaining["c"] == 0
