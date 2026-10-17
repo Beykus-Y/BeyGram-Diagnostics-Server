@@ -59,6 +59,7 @@ def test_panel_disabled_returns_404(settings):
         assert c.get("/admin").status_code == 404
         assert c.get("/admin/login").status_code == 404
         assert c.post("/admin/login", data={"token": "x"}).status_code == 404
+        assert c.get("/admin/assets/admin.css").status_code == 404
 
 
 def test_unauthenticated_redirects_to_login(client):
@@ -368,3 +369,72 @@ def test_maintenance_prunes_sessions(db, settings):
             "SELECT COUNT(*) AS c FROM kv WHERE key LIKE 'admin_session:%'"
         ).fetchone()
     assert remaining["c"] == 0
+
+
+def test_admin_css_is_served_with_strict_csp(client):
+    """CSS is a real static asset, not unstyled inline HTML."""
+    _login(client)
+    page = client.get("/admin")
+    assert page.status_code == 200
+    assert "href='/admin/assets/admin.css'" in page.text
+    assert "style-src 'self'" in page.headers["content-security-policy"]
+    stylesheet = client.get("/admin/assets/admin.css")
+    assert stylesheet.status_code == 200
+    assert stylesheet.headers["content-type"].startswith("text/css")
+    assert "prefers-color-scheme: dark" in stylesheet.text
+    assert "@media (max-width: 740px)" in stylesheet.text
+
+
+def test_tester_filter_search_and_reactivate_without_restart(client):
+    """Admin can revoke and restore immediately using the live SQLite allowlist."""
+    _login(client)
+    csrf = _csrf(client)
+    ctx = client.app.state.context
+
+    add = client.post("/admin/testers/add", data={
+        "csrf": csrf, "user_id": "818234", "label": "QA mobile",
+    }, follow_redirects=False)
+    assert add.status_code == 303
+    with ctx.db.transaction() as conn:
+        assert allowlist.is_active(conn, 818234)
+
+    active = client.get("/admin/testers", params={"status": "active", "q": "QA mobile"})
+    assert "818234" in active.text
+    assert "Активен" in active.text
+
+    revoke = client.post("/admin/testers/revoke", data={
+        "csrf": csrf, "user_id": "818234",
+    }, follow_redirects=False)
+    assert revoke.status_code == 303
+    with ctx.db.transaction() as conn:
+        assert not allowlist.is_active(conn, 818234)
+
+    revoked = client.get("/admin/testers", params={"status": "revoked", "q": "818234"})
+    assert "818234" in revoked.text
+    assert "Разрешить снова" in revoked.text
+    active = client.get("/admin/testers", params={"status": "active", "q": "818234"})
+    assert "818234</code>" not in active.text
+
+    restore = client.post("/admin/testers/restore", data={
+        "csrf": csrf, "user_id": "818234",
+    }, follow_redirects=False)
+    assert restore.status_code == 303
+    with ctx.db.transaction() as conn:
+        entry = allowlist.get(conn, 818234)
+        assert entry is not None and entry.active
+        assert entry.label == "QA mobile"
+
+    restored = client.get("/admin/testers", params={"status": "active", "q": "818234"})
+    assert "818234</code>" in restored.text
+    assert "QA mobile" in restored.text
+
+
+def test_tester_restore_requires_csrf_and_existing_revoked_entry(client):
+    _login(client)
+    csrf = _csrf(client)
+    invalid = client.post("/admin/testers/restore", data={"user_id": "818234"})
+    assert "CSRF" in invalid.text
+    missing = client.post("/admin/testers/restore", data={
+        "csrf": csrf, "user_id": "818234",
+    })
+    assert "Запись не найдена" in missing.text
