@@ -3,6 +3,10 @@
 Текст собирается из уже отредактированных данных. Никакой Markdown-разметки
 по умолчанию (чтобы данные не могли влиять на форматирование), только
 экранирование — сообщение отправляется как обычный текст.
+
+Гарантия размера: каждая часть строится так, чтобы уложиться в лимит Telegram
+(4096), включая служебную подпись с номером части. Ничего не обрезается
+молча — длинные блоки переносятся в следующую часть.
 """
 
 from __future__ import annotations
@@ -10,7 +14,10 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-MAX_MESSAGE_CHARS = 4000
+MAX_MESSAGE_CHARS = 3960
+# Резерв под подпись «[отчёт … · часть i/n]», добавляемую к каждой части.
+# MAX_MESSAGE_CHARS + _PART_SUFFIX_RESERVE должно быть <= 4096 (лимит Telegram).
+_PART_SUFFIX_RESERVE = 120
 
 
 def _fmt_time(ts: float | None) -> str:
@@ -30,45 +37,72 @@ def _fmt_attrs(attrs: dict[str, Any]) -> str:
 
 
 def build_report_message(report) -> list[str]:
-    """Возвращает список сообщений (каждое ≤ 4096 символов)."""
+    """Собирает отчёт в список сообщений.
+
+    Гарантии:
+    * каждая часть ≤ MAX_MESSAGE_CHARS символов (с подписью части);
+    * каждая часть содержит report_id и номер «часть i/n» — это и защита от
+      потери контекста при дублях (at-least-once), и удобная дедупликация;
+    * ни одна строка данных не обрезается молча: не влезло — переносится
+      либо (одиночная сверхдлинная строка) режется с явным маркером «…».
+    """
     meta = report.client_meta()
 
-    header_lines = [
-        "🐞 Новый диагностический отчёт BeyGram",
-        "",
-        f"report_id: {report.report_id}",
-        f"Пользователь: {report.telegram_user_id}",
-        f"Принят: {_fmt_time(report.created_at)}",
-    ]
+    lines: list[str] = []
+    lines.append("🐞 Новый диагностический отчёт BeyGram")
+    lines.append("")
+    lines.append(f"report_id: {report.report_id}")
+    lines.append(f"Пользователь: {report.telegram_user_id}")
+    lines.append(f"Принят: {_fmt_time(report.created_at)}")
     if meta:
         meta_bits = [f"{k}={meta[k]}" for k in sorted(meta)]
-        header_lines.append("Клиент: " + ", ".join(meta_bits))
-
-    header_lines.append("")
-    header_lines.append("— Описание —")
-    header_lines.append(report.description or "(пусто)")
-
+        lines.append("Клиент: " + ", ".join(meta_bits))
+    lines.append("")
+    lines.append("— Описание —")
+    _append_wrapped(lines, report.description or "(пусто)")
     if report.summary:
-        header_lines.append("")
-        header_lines.append("— Сводка —")
-        header_lines.append(report.summary)
-
-    header_lines.append("")
-    header_lines.append(f"— События ({len(report.events())}) —")
-
-    body = "\n".join(header_lines)
-    chunks: list[str] = []
-    current = body
-
+        lines.append("")
+        lines.append("— Сводка —")
+        _append_wrapped(lines, report.summary)
+    lines.append("")
+    lines.append(f"— События ({len(report.events())}) —")
     for event in report.events():
-        line = _format_event(event)
-        if len(current) + len(line) + 1 > MAX_MESSAGE_CHARS:
-            chunks.append(current)
-            current = ""
-        current += ("\n" if current else "") + line
+        _append_wrapped(lines, _format_event(event))
 
-    chunks.append(current)
-    return chunks
+    return _pack_into_chunks(lines, report_id=report.report_id)
+
+
+def _append_wrapped(lines: list[str], text: str) -> None:
+    """Добавляет текст построчно; строки длиннее лимита режутся с «…»."""
+    limit = MAX_MESSAGE_CHARS - _PART_SUFFIX_RESERVE
+    for line in text.splitlines() or [""]:
+        while len(line) > limit:
+            lines.append(line[:limit] + " …(продолжение ниже)")
+            line = line[limit:]
+        lines.append(line)
+
+
+def _pack_into_chunks(lines: list[str], *, report_id: str) -> list[str]:
+    """Жадно упаковывает строки в части с подписью «часть i/n»."""
+    capacity = MAX_MESSAGE_CHARS - _PART_SUFFIX_RESERVE
+    chunks: list[str] = []
+    current = ""
+    for line in lines:
+        candidate = f"{current}\n{line}" if current else line
+        if len(candidate) > capacity and current:
+            chunks.append(current)
+            current = line
+        else:
+            current = candidate
+    if current or not chunks:
+        chunks.append(current)
+
+    total = len(chunks)
+    result: list[str] = []
+    for index, body in enumerate(chunks, start=1):
+        suffix = f"\n— часть {index}/{total} · {report_id}"
+        result.append(body + suffix)
+    return result
 
 
 def _format_event(event: dict[str, Any]) -> str:

@@ -177,16 +177,41 @@ def mark_delivered(conn: sqlite3.Connection, nonce_hash: str, *, at: float | Non
 
 
 def expire_stale(conn: sqlite3.Connection, *, at: float | None = None) -> int:
-    """Помечает EXPIRED все живые nonce, у которых прошёл TTL."""
+    """Помечает EXPIRED только непривязанные ISSUED nonce с истёкшим TTL.
+
+    Nonce, уже привязанные к отчёту (PROCESSING/ACCEPTED), TTL не гасятся:
+    идемпотентный повтор POST того же отчёта должен работать и после истечения
+    TTL (потерянный HTTP-ответ), пока отчёт жив в базе.
+    """
     ts = at if at is not None else now()
     cur = conn.execute(
         """
         UPDATE nonces
            SET state = ?
          WHERE expires_at <= ?
-           AND state IN (?, ?, ?)
+           AND state = ?
         """,
-        (NONCE_EXPIRED, ts, NONCE_ISSUED, NONCE_PROCESSING, NONCE_ACCEPTED),
+        (NONCE_EXPIRED, ts, NONCE_ISSUED),
+    )
+    return cur.rowcount
+
+
+def delete_orphaned_bound(conn: sqlite3.Connection, cutoff: float) -> int:
+    """Удаляет привязанные nonce, чей отчёт уже удалён (retention).
+
+    Идемпотентный повтор для удалённого отчёта всё равно дал бы 401, поэтому
+    хранить такие nonce бессмысленно; cutoff не даёт трогать свежие записи.
+    """
+    cur = conn.execute(
+        """
+        DELETE FROM nonces
+         WHERE state IN (?, ?)
+           AND claimed_at IS NOT NULL
+           AND claimed_at < ?
+           AND report_id IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM reports WHERE reports.report_id = nonces.report_id)
+        """,
+        (NONCE_PROCESSING, NONCE_ACCEPTED, cutoff),
     )
     return cur.rowcount
 

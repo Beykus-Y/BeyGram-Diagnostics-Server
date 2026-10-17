@@ -36,6 +36,7 @@ from ..repository import allowlist, audit, nonces, rate_limit, reports
 from ..schemas import BugReportIn
 from ..security import hash_ip, hash_nonce, make_status_token
 from ..state import (
+    CLIENT_STATUS_CANCELLED,
     CLIENT_STATUS_DELIVERED,
     CLIENT_STATUS_FAILED,
     CLIENT_STATUS_QUEUED,
@@ -45,6 +46,7 @@ from ..state import (
     NONCE_PROCESSING,
     NONCE_REVOKED,
     REPORT_DELIVERED,
+    REPORT_DROPPED,
     REPORT_FAILED,
 )
 from ..util import fingerprint, now
@@ -251,6 +253,7 @@ def _handle_replay(
     status = {
         REPORT_DELIVERED: CLIENT_STATUS_DELIVERED,
         REPORT_FAILED: CLIENT_STATUS_FAILED,
+        REPORT_DROPPED: CLIENT_STATUS_CANCELLED,
     }.get(report.status, CLIENT_STATUS_QUEUED)
 
     return IntakeResult(
@@ -332,7 +335,12 @@ def _sanitize(
     settings: Settings,
     payload: BugReportIn,
 ) -> tuple[str, str | None, list[dict], dict | None, RedactionStats]:
-    """Применяет вторую линию защиты ко всем строкам отчёта."""
+    """Применяет вторую линию защиты ко **всем** строкам отчёта.
+
+    Клиент недоверенный: схема ограничивает структуру, но не содержимое строк,
+    поэтому санитизируются и «малые» поля (code, имена атрибутов, метаданные),
+    а не только description/summary/message.
+    """
     stats = RedactionStats()
 
     description = redact_text(payload.description, stats)[: settings.max_description_chars]
@@ -345,7 +353,11 @@ def _sanitize(
         attrs: dict[str, str] = {}
         for key, value in list(event.attrs.items())[: settings.max_event_attrs]:
             cleaned = scrub_attr_value(key, value, stats)
-            attrs[key[:64]] = cleaned[: settings.max_event_attr_value_chars]
+            # Имя ключа — тоже недоверенная строка: чистим и её.
+            safe_key = redact_text(key, stats)[:64]
+            if not safe_key:
+                continue
+            attrs[safe_key] = cleaned[: settings.max_event_attr_value_chars]
 
         events.append(
             {
@@ -353,13 +365,20 @@ def _sanitize(
                 "at": event.at,
                 "kind": event.kind,
                 "severity": event.severity,
-                "code": event.code,
+                "code": redact_text(event.code or "", stats)[:64] or None,
                 "message": redact_text(event.message, stats)[: settings.max_event_message_chars],
                 "attrs": attrs,
             }
         )
 
-    client_meta = payload.client_meta.to_public_dict() if payload.client_meta else None
+    client_meta: dict | None = None
+    if payload.client_meta:
+        client_meta = {}
+        for key, value in payload.client_meta.to_public_dict().items():
+            if isinstance(value, str):
+                client_meta[key] = redact_text(value, stats)[:200]
+            else:
+                client_meta[key] = value
     return description, summary, events, client_meta, stats
 
 
@@ -414,12 +433,16 @@ async def get_status(
         status = {
             REPORT_DELIVERED: CLIENT_STATUS_DELIVERED,
             REPORT_FAILED: CLIENT_STATUS_FAILED,
+            REPORT_DROPPED: CLIENT_STATUS_CANCELLED,
         }.get(report.status, CLIENT_STATUS_QUEUED)
 
         detail = {
             CLIENT_STATUS_QUEUED: "Отчёт в очереди на доставку.",
             CLIENT_STATUS_DELIVERED: "Отчёт доставлен разработчику.",
             CLIENT_STATUS_FAILED: "Не удалось доставить отчёт. Используйте ручной экспорт.",
+            CLIENT_STATUS_CANCELLED: (
+                "Доставка отчёта отменена администратором; новый отчёт отправить нельзя."
+            ),
         }.get(status, "")
 
         return StatusResult(

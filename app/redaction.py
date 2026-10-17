@@ -37,6 +37,18 @@ _UUID_V4 = re.compile(
     r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}\b"
 )
 _PRIVATE_IP_SHAPE = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}(?::\d{1,5})?\b")
+# Кандидаты в IPv6 (полная 8-групповая форма, сжатая с "::" и "::"-префикс).
+# Regex только находит кандидатов — реальная проверка делается ipaddress.ip_address,
+# поэтому «похожие» строки (время 12:34:56, MAC) остаются нетронутыми.
+_IPV6 = re.compile(
+    r"(?<![\w:.])"
+    r"(?:"
+    r"(?:[0-9A-Fa-f]{1,4}:){7}[0-9A-Fa-f]{1,4}"
+    r"|(?:[0-9A-Fa-f]{1,4}:){1,7}:(?:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){0,6})?"
+    r"|::(?:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){0,7})?"
+    r")"
+    r"(?![\w:])"
+)
 _PEM = re.compile(r"-----BEGIN [A-Z ]+-----.*?-----END [A-Z ]+-----", re.DOTALL)
 _SECRET_KV = re.compile(
     r"""(?ix)\b(password|passwd|pwd|secret|token|session|auth[_-]?key|private[_-]?key|
@@ -185,8 +197,31 @@ def _sanitize_url(match: re.Match[str], stats: RedactionStats) -> str:
     return f"{scheme}://{host}"
 
 
+def _redact_ipv6(text: str, stats: RedactionStats) -> str:
+    """Вырезает IPv6-адреса; приватные/локальные — всегда, глобальные — тоже
+    (в диагностику они не нужны, а приватность важнее)."""
+
+    def _sub(match: re.Match[str]) -> str:
+        candidate = match.group(0)
+        try:
+            addr = ipaddress.ip_address(candidate.strip("[]"))
+        except ValueError:
+            return candidate
+        if addr.version != 6:
+            return candidate
+        stats.bump("ip_address")
+        return REDACTED
+
+    return _IPV6.sub(_sub, text)
+
+
 def redact_text(text: str, stats: RedactionStats | None = None) -> str:
-    """Вычищает секреты из произвольной строки."""
+    """Вычищает секреты из произвольной строки.
+
+    Полнота важнее точности: hostname и IPv6 вырезаются и здесь, чтобы
+    вызывающие, забывшие про scrub_attr_value/redact_hostname, не пропустили
+    инфраструктурные данные.
+    """
     if not text:
         return text
     stats = stats if stats is not None else RedactionStats()
@@ -203,9 +238,11 @@ def redact_text(text: str, stats: RedactionStats | None = None) -> str:
     result = _redact_pattern(_EMAIL, result, stats, "email")
     result = _redact_pattern(_PHONE, result, stats, "phone")
     result = _redact_pattern(_PRIVATE_IP_SHAPE, result, stats, "ip_address")
+    result = _redact_ipv6(result, stats)
     result = _redact_pattern(_UUID_V4, result, stats, "uuid")
     # Ссылки подписок/прокси — последними: для них нужна своя замена, а не [redacted].
     result = _SUBSCRIPTION_URL.sub(lambda m: _sanitize_url(m, stats), result)
+    result = redact_hostname(result, stats)
 
     return result
 

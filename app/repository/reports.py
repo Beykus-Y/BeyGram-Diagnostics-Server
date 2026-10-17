@@ -43,6 +43,8 @@ class ReportRecord:
     next_attempt_at: float | None
     lease_until: float | None
     delivery_message_id: int | None
+    delivered_parts: int
+    claim_version: int
     last_error: str | None
     created_at: float
     updated_at: float
@@ -51,6 +53,7 @@ class ReportRecord:
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> ReportRecord:
+        keys = row.keys()
         return cls(
             report_id=row["report_id"],
             telegram_user_id=int(row["telegram_user_id"]),
@@ -68,6 +71,8 @@ class ReportRecord:
             next_attempt_at=row["next_attempt_at"],
             lease_until=row["lease_until"],
             delivery_message_id=row["delivery_message_id"],
+            delivered_parts=int(row["delivered_parts"]) if "delivered_parts" in keys else 0,
+            claim_version=int(row["claim_version"]) if "claim_version" in keys else 0,
             last_error=row["last_error"],
             created_at=float(row["created_at"]),
             updated_at=float(row["updated_at"]),
@@ -160,6 +165,11 @@ def claim_next_for_delivery(
     Берём самый старый QUEUED, готовый по времени (next_attempt_at <= now), и
     помечаем PROCESSING с lease. При падении воркера lease истечёт и отчёт
     вернётся в очередь через requeue_expired_leases().
+
+    Инкремент claim_version — это fencing-токен: все последующие записи
+    (прогресс, DELIVERED, ретрай) принимаются только с этой версией, поэтому
+    воркер, «выживший» после отзыва отчёта или истечения lease, не сможет
+    перезаписать чужое состояние.
     """
     ts = at if at is not None else now()
     row = conn.execute(
@@ -178,7 +188,8 @@ def claim_next_for_delivery(
     cur = conn.execute(
         """
         UPDATE reports
-           SET status = ?, lease_until = ?, attempts = attempts + 1, updated_at = ?
+           SET status = ?, lease_until = ?, attempts = attempts + 1, updated_at = ?,
+               claim_version = claim_version + 1
          WHERE report_id = ? AND status = ?
         """,
         (REPORT_PROCESSING, ts + lease_seconds, ts, row["report_id"], REPORT_QUEUED),
@@ -192,46 +203,97 @@ def mark_delivered(
     conn: sqlite3.Connection,
     report_id: str,
     *,
+    claim_version: int,
     message_id: int | None,
     at: float | None = None,
-) -> None:
+) -> bool:
+    """Помечает доставленным. Успех только если claim ещё действителен.
+
+    False означает, что отчёт был отозван (DROPPED), перезахвачен другим
+    воркером или уже завершён — перезаписывать состояние нельзя.
+    """
     ts = at if at is not None else now()
-    conn.execute(
+    cur = conn.execute(
         """
         UPDATE reports
            SET status = ?, delivered_at = ?, updated_at = ?, lease_until = NULL,
                next_attempt_at = NULL, delivery_message_id = ?, last_error = NULL
          WHERE report_id = ?
+           AND status = ?
+           AND claim_version = ?
         """,
-        (REPORT_DELIVERED, ts, ts, message_id, report_id),
+        (REPORT_DELIVERED, ts, ts, message_id, report_id, REPORT_PROCESSING, claim_version),
     )
+    return cur.rowcount == 1
+
+
+def save_delivery_progress(
+    conn: sqlite3.Connection,
+    report_id: str,
+    *,
+    claim_version: int,
+    parts_delivered: int,
+    message_id: int | None,
+    at: float | None = None,
+) -> bool:
+    """Фиксирует число подтверждённо отправленных частей отчёта.
+
+    После рестарта/ретрая воркер продолжит со следующей части. Требует
+    действующего claim — иначе прогресс не сохраняется.
+    """
+    ts = at if at is not None else now()
+    cur = conn.execute(
+        """
+        UPDATE reports
+           SET delivered_parts = ?, delivery_message_id = ?, updated_at = ?
+         WHERE report_id = ?
+           AND status = ?
+           AND claim_version = ?
+           AND delivered_parts < ?
+        """,
+        (
+            parts_delivered,
+            message_id,
+            ts,
+            report_id,
+            REPORT_PROCESSING,
+            claim_version,
+            parts_delivered,
+        ),
+    )
+    return cur.rowcount == 1
 
 
 def schedule_retry(
     conn: sqlite3.Connection,
     report_id: str,
     *,
+    claim_version: int,
     error: str,
     delay_seconds: float,
     at: float | None = None,
 ) -> str:
     """Планирует повторную попытку либо помечает FAILED при исчерпании.
 
-    Возвращает новое состояние отчёта.
+    Возвращает новое состояние отчёта. Если claim уже недействителен
+    (отзыв/перезахват), состояние НЕ меняется — возвращается фактическое.
     """
     ts = at if at is not None else now()
     record = get(conn, report_id)
     if record is None:
         return REPORT_FAILED
+    if record.claim_version != claim_version or record.status != REPORT_PROCESSING:
+        # Fencing: заявка устарела — отчёт уже отозван или взят заново.
+        return record.status
 
     if record.attempts >= record.max_attempts:
         conn.execute(
             """
             UPDATE reports
                SET status = ?, last_error = ?, updated_at = ?, lease_until = NULL
-             WHERE report_id = ?
+             WHERE report_id = ? AND status = ? AND claim_version = ?
             """,
-            (REPORT_FAILED, error[:1000], ts, report_id),
+            (REPORT_FAILED, error[:1000], ts, report_id, REPORT_PROCESSING, claim_version),
         )
         return REPORT_FAILED
 
@@ -239,9 +301,9 @@ def schedule_retry(
         """
         UPDATE reports
            SET status = ?, last_error = ?, next_attempt_at = ?, lease_until = NULL, updated_at = ?
-         WHERE report_id = ?
+         WHERE report_id = ? AND status = ? AND claim_version = ?
         """,
-        (REPORT_QUEUED, error[:1000], ts + delay_seconds, ts, report_id),
+        (REPORT_QUEUED, error[:1000], ts + delay_seconds, ts, report_id, REPORT_PROCESSING, claim_version),
     )
     return REPORT_QUEUED
 
@@ -263,12 +325,17 @@ def requeue_expired_leases(conn: sqlite3.Connection, *, at: float | None = None)
 
 
 def drop_pending(conn: sqlite3.Connection, *, reason: str, at: float | None = None) -> int:
-    """Снимает с доставки всё, что ещё не отправлено (kill switch / отзыв)."""
+    """Снимает с доставки всё, что ещё не отправлено (kill switch / отзыв).
+
+    Инкремент claim_version инвалидирует заявки работающих воркеров: их
+    последующие mark_delivered/save_progress будут отклонены.
+    """
     ts = at if at is not None else now()
     cur = conn.execute(
         """
         UPDATE reports
-           SET status = ?, last_error = ?, updated_at = ?, lease_until = NULL
+           SET status = ?, last_error = ?, updated_at = ?, lease_until = NULL,
+               claim_version = claim_version + 1
          WHERE status IN (?, ?)
         """,
         (REPORT_DROPPED, reason[:1000], ts, REPORT_QUEUED, REPORT_PROCESSING),
@@ -287,7 +354,8 @@ def drop_pending_for_user(
     cur = conn.execute(
         """
         UPDATE reports
-           SET status = ?, last_error = ?, updated_at = ?, lease_until = NULL
+           SET status = ?, last_error = ?, updated_at = ?, lease_until = NULL,
+               claim_version = claim_version + 1
          WHERE telegram_user_id = ?
            AND status IN (?, ?)
         """,
@@ -313,6 +381,41 @@ def queue_depth(conn: sqlite3.Connection) -> int:
         (REPORT_QUEUED, REPORT_PROCESSING),
     ).fetchone()
     return int(row["c"]) if row else 0
+
+
+def oldest_queued_age(conn: sqlite3.Connection, *, at: float | None = None) -> float | None:
+    """Возраст старого отчёта, который так и не доставлен (для readiness)."""
+    ts = at if at is not None else now()
+    row = conn.execute(
+        "SELECT MIN(created_at) AS oldest FROM reports WHERE status IN (?, ?)",
+        (REPORT_QUEUED, REPORT_PROCESSING),
+    ).fetchone()
+    if row is None or row["oldest"] is None:
+        return None
+    return max(0.0, ts - float(row["oldest"]))
+
+
+def retry_failed(
+    conn: sqlite3.Connection,
+    report_id: str,
+    *,
+    at: float | None = None,
+) -> bool:
+    """Ручной повтор FAILED-отчёта (админ-панель): FAILED → QUEUED.
+
+    Только из терминального FAILED, с инкрементом claim_version.
+    """
+    ts = at if at is not None else now()
+    cur = conn.execute(
+        """
+        UPDATE reports
+           SET status = ?, next_attempt_at = ?, lease_until = NULL, updated_at = ?,
+               claim_version = claim_version + 1
+         WHERE report_id = ? AND status = ?
+        """,
+        (REPORT_QUEUED, ts, ts, report_id, REPORT_FAILED),
+    )
+    return cur.rowcount == 1
 
 
 def delete_older_than(conn: sqlite3.Connection, cutoff: float) -> int:

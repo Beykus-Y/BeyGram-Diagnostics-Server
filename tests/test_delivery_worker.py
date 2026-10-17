@@ -42,6 +42,12 @@ class FakeCtx:
         self.report_bot = FakeReportBot()
         self.stopping = asyncio.Event()
 
+    def worker_success(self, name: str) -> None:  # noqa: ARG002
+        pass
+
+    def worker_failure(self, name: str, error: str) -> None:  # noqa: ARG002
+        pass
+
 
 def _seed_report(db, settings, *, user_id: int = 900001, report_id: str | None = None) -> str:
     from app.repository import allowlist

@@ -54,6 +54,14 @@ class Settings(BaseSettings):
     bootstrap_allowlist: str = ""
     accept_reports: bool = True
 
+    # --- Админ-панель --------------------------------------------------------
+    # Пустой ADMIN_TOKEN полностью выключает панель (все /admin* отвечают 404).
+    # Панель предназначена для приватной сети / identity-aware proxy.
+    admin_token: str = ""
+    admin_session_ttl_seconds: int = 3600
+    admin_login_attempts_per_hour: int = 10
+    admin_page_size: int = 25
+
     # --- Протокол / лимиты ---------------------------------------------------
     nonce_ttl_seconds: int = 420
     max_body_bytes: int = 256 * 1024
@@ -131,6 +139,13 @@ class Settings(BaseSettings):
     def _check_ttl(cls, v: int) -> int:
         if not (60 <= v <= 900):
             raise ValueError("NONCE_TTL_SECONDS must be between 60 and 900")
+        return v
+
+    @field_validator("admin_session_ttl_seconds")
+    @classmethod
+    def _check_admin_ttl(cls, v: int) -> int:
+        if not (300 <= v <= 86400):
+            raise ValueError("ADMIN_SESSION_TTL_SECONDS must be between 300 and 86400")
         return v
 
     @model_validator(mode="after")

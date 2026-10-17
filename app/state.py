@@ -50,3 +50,4 @@ def report_state_for_nonce(nonce_state: str) -> str:
 CLIENT_STATUS_QUEUED = "queued"
 CLIENT_STATUS_DELIVERED = "delivered"
 CLIENT_STATUS_FAILED = "failed"
+CLIENT_STATUS_CANCELLED = "cancelled"  # снят с доставки (отзыв доступа/kill switch)

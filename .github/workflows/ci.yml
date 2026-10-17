@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint-test:
+    name: Ruff + pytest (Python 3.12)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Ruff
+        run: python -m ruff check app tests
+
+      - name: Pytest
+        env:
+          # Тестам секреты не нужны: conftest подставляет фикстуры.
+          # Переменные явно обнулены, чтобы случайно не подхватить окружение.
+          REPORT_BOT_TOKEN: ""
+          DELIVERY_BOT_TOKEN: ""
+          NONCE_PEPPER: ""
+          BOOTSTRAP_ALLOWLIST: ""
+        run: python -m pytest tests -q --basetemp=.pytest-tmp-ci
+
+  docker:
+    name: Docker build + compose config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate compose file
+        run: docker compose config -q
+
+      - name: Build image
+        run: docker build -t beygram-report-server:ci .
+
+      - name: Smoke: image starts and answers /healthz
+        run: |
+          docker run -d --name smoke \
+            -e APP_ENV=development \
+            -e DATABASE_PATH=/tmp/smoke.db \
+            -e REQUIRE_HTTPS=false \
+            -e ENABLE_BOT=false \
+            -e ENABLE_WORKER=false \
+            -e ENABLE_MAINTENANCE=false \
+            -p 8080:8080 \
+            beygram-report-server:ci
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/healthz > /dev/null; then
+              echo "healthz OK"; docker rm -f smoke > /dev/null; exit 0
+            fi
+            sleep 1
+          done
+          echo "service did not become healthy"; docker logs smoke; docker rm -f smoke > /dev/null
+          exit 1

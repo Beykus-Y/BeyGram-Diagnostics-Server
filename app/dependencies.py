@@ -88,10 +88,14 @@ def bearer_nonce(request: Request) -> str:
 
 
 def status_token_from_request(request: Request) -> str:
+    """Status-токен принимается только из заголовка Authorization.
+
+    Query string попадает в логи прокси, историю браузера и трассировки,
+    поэтому передача токена в URL не допускается.
+    """
     header = request.headers.get("authorization")
     if header:
         match = _BEARER_RE.match(header.strip())
         if match:
             return match.group(1)
-    # Резервный способ для сред, где нельзя задать заголовок (например, тесты).
-    return request.query_params.get("status_token", "")
+    return ""

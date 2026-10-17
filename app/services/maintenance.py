@@ -1,7 +1,8 @@
 """Периодическое обслуживание: очистка, ротация, отчёты о состоянии.
 
 Задачи:
-* пометить EXPIRED все nonce с истёкшим TTL и удалить старые погашенные;
+* пометить EXPIRED непривязанные ISSUED nonce с истёкшим TTL и удалить
+  старые погашенные, а также nonce удалённых отчётов;
 * удалить доставленные/проваленные отчёты старше срока хранения;
 * почистить счётчики rate limit и старый аудит;
 * сделать WAL-checkpoint, чтобы файл БД не разрастался;
@@ -36,9 +37,11 @@ async def run(ctx) -> None:
     while not ctx.stopping.is_set():
         try:
             last_checkpoint = await _tick(ctx, settings, last_checkpoint=last_checkpoint)
+            ctx.worker_success("maintenance")
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001
+            ctx.worker_failure("maintenance", "tick failed")
             log.exception("maintenance iteration failed")
 
         await _sleep(ctx, settings.maintenance_interval_seconds)
@@ -53,7 +56,10 @@ async def _tick(ctx, settings: Settings, *, last_checkpoint: float) -> float:
         with db.transaction() as conn:
             expired = nonces.expire_stale(conn, at=ts)
             removed_nonces = nonces.delete_terminal_older_than(conn, retention_cutoff)
+            # Сначала отчёты, потом осиротевшие nonce — окно гонки не страшно:
+            # следующий тик дочистит остаток.
             removed_reports = reports.delete_older_than(conn, retention_cutoff)
+            removed_orphans = nonces.delete_orphaned_bound(conn, retention_cutoff)
             removed_audit = audit.prune(
                 conn, keep_seconds=settings.audit_retention_days * 86400, at=ts
             )
@@ -61,6 +67,7 @@ async def _tick(ctx, settings: Settings, *, last_checkpoint: float) -> float:
             return {
                 "expired_nonces": expired,
                 "removed_nonces": removed_nonces,
+                "removed_orphan_nonces": removed_orphans,
                 "removed_reports": removed_reports,
                 "removed_audit": removed_audit,
                 "removed_rate_events": removed_rate,

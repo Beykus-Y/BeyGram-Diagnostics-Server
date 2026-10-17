@@ -160,7 +160,7 @@ class AcceptedBugReport(BaseIn):
     """Ответ на успешный приём отчёта."""
 
     report_id: str
-    status: Literal["queued", "delivered", "failed"]
+    status: Literal["queued", "delivered", "failed", "cancelled"]
     accepted_at: float
     status_token: str
     idempotent_replay: bool = False
@@ -172,7 +172,7 @@ class BugReportStatus(BaseIn):
     """Ответ GET /api/v1/bug-reports/{report_id}."""
 
     report_id: str
-    status: Literal["queued", "delivered", "failed"]
+    status: Literal["queued", "delivered", "failed", "cancelled"]
     accepted_at: float
     updated_at: float
     delivered_at: float | None = None

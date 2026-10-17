@@ -23,7 +23,7 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _DDL_V1 = """
 CREATE TABLE IF NOT EXISTS allowlist (
@@ -104,7 +104,12 @@ CREATE TABLE IF NOT EXISTS kv (
 );
 """
 
-_MIGRATIONS: tuple[tuple[int, str], ...] = ((1, _DDL_V1),)
+_DDL_V2 = """
+ALTER TABLE reports ADD COLUMN claim_version INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE reports ADD COLUMN delivered_parts INTEGER NOT NULL DEFAULT 0;
+"""
+
+_MIGRATIONS: tuple[tuple[int, str], ...] = ((1, _DDL_V1), (2, _DDL_V2))
 
 
 class Database:

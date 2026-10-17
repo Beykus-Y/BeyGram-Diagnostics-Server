@@ -271,6 +271,69 @@ def test_status_lookup_with_wrong_token(client, settings):
     assert response.status_code == 401
 
 
+def test_status_token_in_query_string_rejected(client, settings):
+    """Токен статуса не принимается через URL (логи прокси/история браузера)."""
+    nonce = _issue_nonce(client, settings)
+    accepted = _post(client, nonce, _report_body()).json()
+
+    response = client.get(
+        f"/api/v1/bug-reports/{accepted['report_id']}?status_token={accepted['status_token']}"
+    )
+    assert response.status_code == 401
+
+
+def test_dropped_report_shows_cancelled_status(client, settings):
+    """После отзыва доступа клиент видит терминальный cancelled, не queued."""
+    nonce = _issue_nonce(client, settings, user_id=555004)
+    accepted = _post(client, nonce, _report_body()).json()
+
+    ctx = client.app.state.context
+    with ctx.db.transaction() as conn:
+        allowlist.revoke(conn, 555004, reason="left beta")
+        from app.repository import reports
+
+        reports.drop_pending_for_user(conn, 555004, reason="allowlist revoked")
+
+    status = client.get(
+        f"/api/v1/bug-reports/{accepted['report_id']}",
+        headers={"Authorization": f"Bearer {accepted['status_token']}"},
+    )
+    assert status.status_code == 200
+    assert status.json()["status"] == "cancelled"
+
+    # Отозванный пользователь больше не может пользоваться и токеном отчёта.
+    replay = _post(client, nonce, _report_body())
+    assert replay.status_code == 401
+
+
+def test_unsanitized_fields_are_redacted_everywhere(client, settings):
+    """code, имена attrs и client_meta проходят санитизацию (#1)."""
+    nonce = _issue_nonce(client, settings)
+    body = _report_body()
+    body["events"][0]["code"] = "leak token=very_secret_value_123456"
+    body["events"][0]["attrs"] = {
+        "secret_host": "vless://user@hidden.example:443",
+        "endpoint": "proxy 2001:db8::1 deadbeef.example",
+    }
+    body["client_meta"]["device_model"] = "vless://user@secret.example"
+    assert _post(client, nonce, body).status_code == 202
+
+    ctx = client.app.state.context
+    with ctx.db.transaction() as conn:
+        row = conn.execute(
+            "SELECT events_json, client_meta_json FROM reports WHERE report_id = ?",
+            (body["report_id"],),
+        ).fetchone()
+    events = json.loads(row["events_json"])
+    meta = json.loads(row["client_meta_json"])
+
+    assert "very_secret_value" not in events[0]["code"]
+    assert "hidden.example" not in json.dumps(events[0]["attrs"])
+    assert "2001:db8::1" not in json.dumps(events[0]["attrs"])
+    assert "deadbeef.example" not in json.dumps(events[0]["attrs"])
+    assert "secret.example" not in meta["device_model"]
+
+
 def test_health(client):
     response = client.get("/healthz")
     assert response.status_code == 200

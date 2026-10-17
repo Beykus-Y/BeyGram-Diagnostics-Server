@@ -8,6 +8,7 @@ from ..util import now
 
 KEY_ACCEPT_REPORTS = "accept_reports"
 KEY_INTAKE_NOTE = "intake_note"
+KEY_BOT_LAST_UPDATE = "bot_last_update_id"
 
 
 def set_value(conn: sqlite3.Connection, key: str, value: str, *, at: float | None = None) -> None:

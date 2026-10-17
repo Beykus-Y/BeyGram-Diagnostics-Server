@@ -201,7 +201,7 @@ class ReportBotClient(_BaseTelegramClient):
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "chat_id": chat_id,
-            "text": text[:4096],
+            "text": _enforce_limit(method="sendMessage", text=text),
             "disable_web_page_preview": True,
             "disable_notification": disable_notification,
         }
@@ -222,11 +222,11 @@ class DeliveryBotClient(_BaseTelegramClient):
         parse_mode: str | None = None,
         disable_notification: bool = False,
     ) -> dict[str, Any]:
-        # Telegram ограничивает длину сообщения 4096 символами — разбиение
-        # делает delivery-воркер, здесь только защитная обрезка.
+        # Разбиение на части делает formatting/delivery-воркер; транспорт лишь
+        # последняя линия: превышение лимита пишется в лог как ошибка сборки.
         payload: dict[str, Any] = {
             "chat_id": chat_id,
-            "text": text[:4096],
+            "text": _enforce_limit(method="sendMessage", text=text),
             "disable_web_page_preview": True,
             "disable_notification": disable_notification,
         }
@@ -234,3 +234,22 @@ class DeliveryBotClient(_BaseTelegramClient):
             payload["parse_mode"] = parse_mode
         result = await self._call("sendMessage", payload, timeout=20.0)
         return result if isinstance(result, dict) else {}
+
+
+TELEGRAM_TEXT_LIMIT = 4096
+
+
+def _enforce_limit(*, method: str, text: str) -> str:
+    """Явно логирует нарушение лимита и только затем обрезает.
+
+    Штатный путь — chunker в formatting, который не превышает лимит.
+    Если лимит всё же нарушен, это баг сборки сообщения: молча терять данные
+    нельзя, поэтому фиксируем ошибку в логе.
+    """
+    if len(text) > TELEGRAM_TEXT_LIMIT:  # pragma: no cover - защита от бага сборки
+        log.error(
+            "message text exceeds Telegram limit; truncating (bug in message builder)",
+            extra={"method": method, "length": len(text), "limit": TELEGRAM_TEXT_LIMIT},
+        )
+        return text[:TELEGRAM_TEXT_LIMIT]
+    return text

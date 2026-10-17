@@ -21,7 +21,7 @@ import re
 
 from ..config import Settings
 from ..db import Database
-from ..repository import allowlist, audit, nonces, rate_limit
+from ..repository import allowlist, audit, kv, nonces, rate_limit
 from ..security import NonceFormatError, hash_nonce, validate_nonce
 from ..telegram import (
     ReportBotClient,
@@ -35,6 +35,10 @@ from .settings_service import intake_enabled
 log = logging.getLogger(__name__)
 
 _COMMAND_RE = re.compile(r"^/(?P<cmd>[A-Za-z0-9_]+)(?:@(?P<bot>[A-Za-z0-9_]+))?(?:\s+(?P<rest>.*))?$", re.DOTALL)
+
+# Сколько раз апдейт может упасть в обработке, прежде чем мы пропустим его,
+# чтобы «ядовитое» сообщение не заблокировало очередь (at-least-once c limiter).
+_MAX_HANDLER_ATTEMPTS = 3
 
 MSG_CONFIRMED = (
     "Запрос подтверждён.\n"
@@ -57,14 +61,22 @@ MSG_NOT_ALLOWED = (
 
 
 async def run(ctx) -> None:
-    """Цикл long polling. Перезапускается при временных сбоях Bot API."""
+    """Цикл long polling. Перезапускается при временных сбоях Bot API.
+
+    Смещение (offset) хранится в kv и переживает рестарт: обработанные
+    апдейты не приходят повторно и не списывают лимиты второй раз. Семантика
+    обработки — at-least-once: если процесс упал между обработкой и фиксацией,
+    апдейт придёт снова, но повтор списания лимита защищён проверкой
+    update_id в той же транзакции.
+    """
     import asyncio
 
     settings: Settings = ctx.settings
     client: ReportBotClient = ctx.report_bot
 
-    offset: int | None = None
+    offset = await _load_offset_db(ctx)
     backoff = settings.bot_error_backoff_seconds
+    failures: dict[int, int] = {}
 
     try:
         me = await client.get_me()
@@ -79,13 +91,16 @@ async def run(ctx) -> None:
                 timeout_seconds=settings.bot_poll_timeout_seconds,
                 allowed_updates=["message", "edited_message"],
             )
+            ctx.worker_success("bot-worker")
             backoff = settings.bot_error_backoff_seconds
         except TelegramTemporaryError as exc:
+            ctx.worker_failure("bot-worker", "getUpdates temporary failure")
             log.warning("getUpdates temporary failure: %s", exc.__class__.__name__)
             await _sleep(ctx, backoff)
             backoff = min(backoff * 2, 120)
             continue
         except TelegramPermanentError as exc:
+            ctx.worker_failure("bot-worker", "getUpdates permanent failure")
             # Неверный токен и т.п. — нет смысла крутиться в цикле каждую секунду.
             log.error("getUpdates permanent failure: %s", exc.__class__.__name__)
             await _sleep(ctx, 60)
@@ -93,20 +108,71 @@ async def run(ctx) -> None:
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001
+            ctx.worker_failure("bot-worker", "unexpected polling error")
             log.exception("unexpected error in bot polling")
             await _sleep(ctx, backoff)
             backoff = min(backoff * 2, 120)
             continue
 
         for update in updates:
-            offset = max(offset or 0, update.update_id + 1)
+            if offset is not None and update.update_id < offset:
+                continue  # уже обработан в прошлый раз (защита от повторов)
             try:
                 await _handle_update(ctx, update)
             except Exception:  # noqa: BLE001 - один плохой апдейт не должен ронять цикл
-                log.exception("failed to handle update", extra={"update_id": update.update_id})
+                failures[update.update_id] = failures.get(update.update_id, 0) + 1
+                log.exception(
+                    "failed to handle update",
+                    extra={"update_id": update.update_id, "attempt": failures[update.update_id]},
+                )
+                if failures[update.update_id] < _MAX_HANDLER_ATTEMPTS:
+                    # Не подтверждаем апдейт — получим его снова на следующем poll.
+                    offset = update.update_id
+                    break
+                log.error(
+                    "update skipped after repeated failures",
+                    extra={"update_id": update.update_id},
+                )
+            # Апдейт обработан (или пропущен после _MAX_HANDLER_ATTEMPTS).
+            await _commit_offset(ctx, update.update_id)
+            offset = update.update_id + 1
+            failures.pop(update.update_id, None)
+            ctx.worker_success("bot-worker")
 
         if not updates:
             await _sleep(ctx, settings.bot_poll_interval_seconds)
+
+
+async def _load_offset_db(ctx) -> int | None:
+    """Восстанавливает offset из kv (переживает рестарт процесса)."""
+    db: Database = ctx.db
+
+    def _read() -> int | None:
+        stored = kv.get_value(db.connection, kv.KEY_BOT_LAST_UPDATE)
+        if not stored:
+            return None
+        try:
+            return int(stored) + 1
+        except ValueError:
+            return None
+
+    return await db.run(_read)
+
+
+async def _commit_offset(ctx, update_id: int) -> None:
+    db: Database = ctx.db
+
+    def _write() -> None:
+        with db.transaction() as conn:
+            stored = kv.get_value(conn, kv.KEY_BOT_LAST_UPDATE)
+            try:
+                last = int(stored) if stored else 0
+            except ValueError:
+                last = 0
+            if update_id > last:
+                kv.set_value(conn, kv.KEY_BOT_LAST_UPDATE, str(update_id))
+
+    await db.run(_write)
 
 
 async def _handle_update(ctx, update: TelegramUpdate) -> None:
@@ -138,20 +204,36 @@ async def _handle_update(ctx, update: TelegramUpdate) -> None:
         await _reply(ctx, user_id, update.message_id, MSG_NEED_NONCE)
         return
 
-    await _handle_report_command(ctx, user_id=user_id, message_id=update.message_id, nonce=argument)
+    await _handle_report_command(
+        ctx, user_id=user_id, message_id=update.message_id, nonce=argument, update_id=update.update_id
+    )
 
 
-async def _handle_report_command(ctx, *, user_id: int, message_id: int | None, nonce: str) -> None:
+async def _handle_report_command(
+    ctx, *, user_id: int, message_id: int | None, nonce: str, update_id: int
+) -> None:
     settings: Settings = ctx.settings
     db: Database = ctx.db
 
     def _prepare() -> tuple[str, str | None]:
-        """Всё под одним локом: лимиты, allowlist, регистрация nonce.
+        """Всё под одним локом: дедупликация, лимиты, allowlist, регистрация nonce.
 
         Возвращает (outcome, correlation_id). outcome ∈
-        {confirmed, disabled, not_allowed, rate_limited, bad_nonce, conflict}.
+        {confirmed, duplicate, disabled, not_allowed, rate_limited, bad_nonce, conflict}.
+        Последний обработанный update_id фиксируется в той же транзакции, что и
+        списание лимитов: повторная доставка апдейта (сбой после обработки)
+        не тратит лимит второй раз.
         """
         with db.transaction() as conn:
+            stored = kv.get_value(conn, kv.KEY_BOT_LAST_UPDATE)
+            try:
+                last_update = int(stored) if stored else 0
+            except ValueError:
+                last_update = 0
+            if update_id <= last_update:
+                # Апдейт уже учтён ранее (повторная доставка после сбоя).
+                return "duplicate", None
+
             if not intake_enabled(conn, settings):
                 return "disabled", None
 
@@ -164,6 +246,7 @@ async def _handle_report_command(ctx, *, user_id: int, message_id: int | None, n
                 window_seconds=3600,
             )
             if not ok:
+                kv.set_value(conn, kv.KEY_BOT_LAST_UPDATE, str(update_id))
                 audit.write(conn, actor="bot", action="report_cmd_rate_limited", target=str(user_id))
                 return "rate_limited", None
 
@@ -175,6 +258,7 @@ async def _handle_report_command(ctx, *, user_id: int, message_id: int | None, n
                 window_seconds=3600,
             )
             if not ok:
+                kv.set_value(conn, kv.KEY_BOT_LAST_UPDATE, str(update_id))
                 audit.write(conn, actor="bot", action="report_cmd_global_rate_limited")
                 return "rate_limited", None
 
@@ -182,10 +266,12 @@ async def _handle_report_command(ctx, *, user_id: int, message_id: int | None, n
             try:
                 validated = validate_nonce(nonce)
             except NonceFormatError:
+                kv.set_value(conn, kv.KEY_BOT_LAST_UPDATE, str(update_id))
                 return "bad_nonce", None
 
             if not allowlist.is_active(conn, user_id):
                 # Не сообщаем, есть ли id в списке; просто отказ.
+                kv.set_value(conn, kv.KEY_BOT_LAST_UPDATE, str(update_id))
                 audit.write(conn, actor="bot", action="report_cmd_denied", target=str(user_id))
                 return "not_allowed", None
 
@@ -198,6 +284,7 @@ async def _handle_report_command(ctx, *, user_id: int, message_id: int | None, n
                     ttl_seconds=settings.nonce_ttl_seconds,
                 )
             except nonces.NonceConflictError:
+                kv.set_value(conn, kv.KEY_BOT_LAST_UPDATE, str(update_id))
                 audit.write(
                     conn,
                     actor="bot",
@@ -206,6 +293,7 @@ async def _handle_report_command(ctx, *, user_id: int, message_id: int | None, n
                 )
                 return "conflict", None
 
+            kv.set_value(conn, kv.KEY_BOT_LAST_UPDATE, str(update_id))
             correlation_id = nonce_hash[:16]
             audit.write(
                 conn,
@@ -217,6 +305,10 @@ async def _handle_report_command(ctx, *, user_id: int, message_id: int | None, n
             return "confirmed", correlation_id
 
     outcome, correlation_id = await db.run(_prepare)
+    if outcome == "duplicate":
+        # Уже обработано ранее: ничего не отвечаем и не списываем лимиты.
+        log.info("duplicate update skipped", extra={"update_id": update_id})
+        return
 
     messages = {
         "confirmed": MSG_CONFIRMED.format(

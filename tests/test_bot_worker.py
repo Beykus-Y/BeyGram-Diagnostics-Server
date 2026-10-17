@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import itertools
+
 import pytest
 
 from app.repository import allowlist, nonces
 from app.security import hash_nonce
 from app.services import bot_worker
 from app.telegram import TelegramUpdate
+
+_update_ids = itertools.count(1)
 
 
 class FakeBotClient:
@@ -40,9 +44,16 @@ def ctx(db, settings):
     return FakeCtx(db, settings, FakeBotClient())
 
 
-def _update(user_id: int, text: str, *, is_bot: bool = False, chat_type: str = "private") -> TelegramUpdate:
+def _update(
+    user_id: int,
+    text: str,
+    *,
+    is_bot: bool = False,
+    chat_type: str = "private",
+    update_id: int | None = None,
+) -> TelegramUpdate:
     return TelegramUpdate(
-        update_id=1,
+        update_id=update_id if update_id is not None else next(_update_ids),
         message_id=10,
         chat_id=user_id,
         chat_type=chat_type,
@@ -169,6 +180,39 @@ async def test_intake_disabled_blocks_nonce(ctx, db, settings):
 
     assert _nonce_state(db, settings, nonce) is None
     assert "приостановлен" in ctx.report_bot.sent[-1]["text"]
+
+
+async def test_duplicate_update_does_not_spend_rate_limit(ctx, db, settings):
+    """Повторная доставка апдейта (сбой после обработки) не тратит лимит."""
+    from app.security import generate_nonce
+
+    _allow(db, 700011)
+    settings.rl_user_report_cmd_per_hour = 1
+
+    nonce = generate_nonce()
+    update = _update(700011, f"/report {nonce}", update_id=100)
+    await bot_worker._handle_update(ctx, update)
+    assert _nonce_state(db, settings, nonce) is not None
+    replies_after_first = len(ctx.report_bot.sent)
+
+    # Тот же update_id приходит снова (например, после падения процесса).
+    await bot_worker._handle_update(ctx, _update(700011, f"/report {nonce}", update_id=100))
+
+    assert len(ctx.report_bot.sent) == replies_after_first, "дубль не должен отвечать"
+    with db.transaction() as conn:
+        assert nonces.count_by_state(conn).get("ISSUED", 0) == 1
+
+
+async def test_offset_survives_restart(ctx, db, settings):
+    """Offset хранится в kv и восстанавливается после «рестарта»."""
+    await bot_worker._commit_offset(ctx, 41)
+    assert await bot_worker._load_offset_db(ctx) == 42
+
+
+async def test_commit_offset_only_moves_forward(ctx, db, settings):
+    await bot_worker._commit_offset(ctx, 10)
+    await bot_worker._commit_offset(ctx, 5)
+    assert await bot_worker._load_offset_db(ctx) == 11
 
 
 @pytest.mark.parametrize(
