@@ -80,13 +80,13 @@ async def readyz(ctx: ContextDep) -> dict[str, object]:
     if info["integrity"] != "ok":
         problems.append("database integrity")
 
-    if settings.enable_worker and settings.delivery_bot.has_token and settings.delivery_chat_id:
+    if settings.enable_worker and ctx.delivery_bot.has_token and settings.delivery_chat_id:
         if not ctx.worker_running("delivery-worker"):
             problems.append("delivery-worker not running")
         elif _is_stale(ctx, "delivery-worker", ts):
             problems.append("delivery-worker stale")
 
-    if settings.enable_bot and settings.report_bot.has_token:
+    if settings.enable_bot and ctx.report_bot.has_token:
         if not ctx.worker_running("bot-worker"):
             problems.append("bot-worker not running")
         elif _is_stale(ctx, "bot-worker", ts):
