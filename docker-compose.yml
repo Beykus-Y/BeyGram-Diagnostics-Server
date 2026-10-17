@@ -1,0 +1,29 @@
+services:
+  report-server:
+    build: .
+    image: beygram-report-server:latest
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_PATH: /data/beygram_reports.db
+    volumes:
+      - report-data:/data
+    ports:
+      # Bind to localhost and terminate TLS in a reverse proxy in front of it.
+      - "127.0.0.1:8080:8080"
+
+  # Local development helper: fake Bot API so the whole flow can be exercised
+  # without touching real Telegram. Enabled with: docker compose --profile dev up
+  fake-telegram:
+    build: .
+    image: beygram-report-server:latest
+    profiles: ["dev"]
+    command: ["uvicorn", "devtools.fake_telegram:app", "--host", "0.0.0.0", "--port", "8081"]
+    environment:
+      PYTHONPATH: /srv
+    ports:
+      - "127.0.0.1:8081:8081"
+
+volumes:
+  report-data:
