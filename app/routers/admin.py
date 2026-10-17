@@ -66,6 +66,16 @@ def _guard(request: Request, settings: Settings, session) -> tuple[float, str] |
     return session
 
 
+def _telegram_user_id(raw: object) -> int | None:
+    """Строго положительный SQLite INTEGER/TG user_id из HTML формы."""
+    if not isinstance(raw, str) or not raw.isascii() or not raw.isdigit():
+        return None
+    if not (1 <= len(raw) <= 19):
+        return None
+    value = int(raw)
+    return value if 0 < value <= 2**63 - 1 else None
+
+
 def _check_csrf(session: tuple[float, str], form: dict[str, Any]) -> bool:
     token = form.get("csrf")
     return isinstance(token, str) and constant_time_equals(token, session[1])
@@ -218,16 +228,13 @@ async def login(request: Request) -> Response:
         await db.run(
             lambda: _audit(db, "admin_login_failed", {"ip_pseudonym": bool(ip)})
         )
-        return HTMLResponse(
-            content=(
-                "<!doctype html><html><head><meta charset='utf-8'>"
-                "<title>Вход — BeyGram</title></head><body>"
-                "<p class='bad'>Неверный токен. </p>"
-                "<p><a href='/admin/login'>Попробовать снова</a></p></body></html>"
-            ),
-            status_code=401,
-            headers=_secure_headers(),
+        page = _page(
+            "Ошибка входа",
+            "<p class='bad'>Неверный токен.</p>"
+            "<p><a href='/admin/login'>Попробовать снова</a></p>",
         )
+        page.status_code = 401
+        return page
 
     async def _create_session() -> str:
         # Замыкание: создаёт запись сессии в реестре в короткой транзакции.
@@ -682,14 +689,15 @@ async def testers_add(request: Request) -> Response:
     if not _check_csrf(guarded, form):
         return _page("Ошибка", "<p class='bad'>Недействительный CSRF-токен.</p>")
     raw_id = form.get("user_id")
-    if not isinstance(raw_id, str) or not raw_id.isdigit() or int(raw_id) <= 0:
+    user_id = _telegram_user_id(raw_id)
+    if user_id is None:
         return _page("Ошибка", "<p class='bad'>Некорректный user id.</p>")
     label = form.get("label")
     label = label.strip()[:100] if isinstance(label, str) else ""
 
     def _add() -> None:
         with db.transaction() as conn:
-            allowlist.add(conn, int(raw_id), label=label)
+            allowlist.add(conn, user_id, label=label)
             audit.write(
                 conn,
                 actor="admin",
@@ -713,9 +721,9 @@ async def testers_restore(request: Request) -> Response:
     if not _check_csrf(guarded, form):
         return _page("Ошибка", "<p class='bad'>Недействительный CSRF-токен.</p>")
     raw_id = form.get("user_id")
-    if not isinstance(raw_id, str) or not raw_id.isdigit() or int(raw_id) <= 0:
+    user_id = _telegram_user_id(raw_id)
+    if user_id is None:
         return _page("Ошибка", "<p class='bad'>Некорректный user id.</p>")
-    user_id = int(raw_id)
     db: Database = ctx.db
 
     def _restore() -> bool:
@@ -751,9 +759,9 @@ async def testers_revoke(request: Request) -> Response:
     if not _check_csrf(guarded, form):
         return _page("Ошибка", "<p class='bad'>Недействительный CSRF-токен.</p>")
     raw_id = form.get("user_id")
-    if not isinstance(raw_id, str) or not raw_id.isdigit():
+    user_id = _telegram_user_id(raw_id)
+    if user_id is None:
         return _page("Ошибка", "<p class='bad'>Некорректный user id.</p>")
-    user_id = int(raw_id)
 
     def _revoke() -> dict[str, int]:
         with db.transaction() as conn:
