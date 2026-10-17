@@ -338,3 +338,24 @@ def test_health(client):
     response = client.get("/healthz")
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
+
+def test_readyz_with_enabled_bot_workers_does_not_crash(client, settings):
+    """Regression #19: bot instances live in AppContext, not Settings.
+
+    The app TestClient lifespan starts with workers disabled (no real Bot API).
+    Enabling readiness checks at runtime exercises both bot-client branches
+    without network access; missing ctx references previously returned 500.
+    """
+    # Both flags disabled: baseline readiness should work.
+    baseline = client.get("/readyz")
+    assert baseline.status_code == 200
+    assert baseline.json()["status"] == "ok"
+
+    settings.enable_bot = True
+    settings.enable_worker = True
+    response = client.get("/readyz")
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["status"] == "degraded"
+    assert "delivery-worker not running" in data["problems"]
+    assert "bot-worker not running" in data["problems"]
