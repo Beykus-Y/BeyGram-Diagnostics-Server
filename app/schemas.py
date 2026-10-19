@@ -35,6 +35,7 @@ EventKind = Literal[
     "error",
     "performance",
     "ui",
+    "notification",
     "other",
 ]
 
