@@ -103,6 +103,29 @@ def test_sensitive_attribute_is_redacted(client, settings):
     assert events[0]["attrs"]["latency_ms"] == "30000"
 
 
+@pytest.mark.parametrize("kind", [
+    "connection", "network", "vpn", "tdlib", "update",
+    "error", "performance", "ui", "notification", "other",
+])
+def test_all_android_event_kinds_accepted(client, settings, kind):
+    """The server accepts every EventKind emitted by BeyGram Android."""
+    nonce = _issue_nonce(client, settings)
+    body = _report_body()
+    body["events"][0]["kind"] = kind
+    response = _post(client, nonce, body)
+    assert response.status_code == 202, response.text
+
+
+def test_unknown_event_kind_rejected(client, settings):
+    """Unknown event kinds still fail strict schema validation."""
+    nonce = _issue_nonce(client, settings)
+    body = _report_body()
+    body["events"][0]["kind"] = "unrecognized_kind"
+    response = _post(client, nonce, body)
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "payload_invalid"
+
+
 # --- Идемпотентность и повторное использование ------------------------------
 
 
