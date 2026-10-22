@@ -28,7 +28,7 @@ from .middleware import (
     error_response,
 )
 from .repository import allowlist, audit
-from .routers import admin, bug_reports, health
+from .routers import admin, analytics, bug_reports, health
 from .services.settings_service import set_intake_enabled
 
 log = logging.getLogger(__name__)
@@ -84,6 +84,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.include_router(health.router)
     app.include_router(bug_reports.router, prefix=API_PREFIX)
+    app.include_router(analytics.router, prefix=API_PREFIX)
     # Админ-панель: вне /api/v1, выключена без ADMIN_TOKEN (404 на все /admin*).
     app.include_router(admin.router)
 

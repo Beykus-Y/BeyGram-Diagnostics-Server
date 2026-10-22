@@ -121,7 +121,7 @@ def _page(title: str, body: str) -> HTMLResponse:
             "<span class='brand-copy'>BeyGram<small>Diagnostics console</small></span></a>"
             "<nav class='nav-links' aria-label='Управление'>"
             "<a href='/admin'>Обзор</a><a href='/admin/reports'>Отчёты</a>"
-            "<a href='/admin/testers'>Доступ</a><a href='/admin/audit'>Аудит</a></nav>"
+            "<a href='/admin/testers'>Доступ</a><a href='/admin/analytics'>Аналитика</a><a href='/admin/audit'>Аудит</a></nav>"
             "<form method='post' action='/admin/logout'>"
             "<button class='btn secondary' type='submit'>Выйти</button></form>"
             "</header><header class='page-header'>"
@@ -358,6 +358,126 @@ async def overview(request: Request) -> Response:
         f"{workers_html}</table>"
     )
     return _page("Обзор", body)
+
+
+# --- Analytics ---------------------------------------------------------------
+
+
+@router.get("/analytics")
+async def analytics_page(
+    request: Request, status: str = "all", channel: str = "all",
+    version: str = "", page: int = 1,
+) -> Response:
+    """Private installation dashboard; never show Telegram user IDs."""
+    from urllib.parse import urlencode
+
+    from ..repository import analytics as analytics_storage
+    from ..util import now
+
+    ctx = request.app.state.context
+    guarded = _guard(request, ctx.settings, await _session(ctx, request))
+    if isinstance(guarded, Response):
+        return guarded
+    timestamp = now()
+    page = min(max(1, page), 100000)
+    version = version.strip()[:40]
+    db: Database = ctx.db
+
+    def read():
+        summary = analytics_storage.dashboard(db.connection, at=timestamp)
+        records, total = analytics_storage.installations(
+            db.connection, at=timestamp, status=status, channel=channel,
+            version=version, page=page, page_size=25,
+        )
+        return summary, records, total
+
+    summary, records, total = await db.run(read)
+
+    def value(number: int) -> str:
+        return str(number)
+
+    def small_table(heading: str, values: list[dict]) -> str:
+        rows = "".join(
+            f"<tr><td>{html.escape(str(row['name']))}</td><td>{row['count']}</td></tr>"
+            for row in values
+        ) or "<tr><td colspan='2' class='muted'>Пока нет данных</td></tr>"
+        return f"<h2>{html.escape(heading)}</h2><table><tr><th>Значение</th><th>Установки</th></tr>{rows}</table>"
+
+    select_status = status if status in {"all", "approved", "not_approved", "unknown"} else "all"
+    select_channel = channel if channel in {"all", "stable", "dev"} else "all"
+    filters = (
+        ("all", "Все"),
+        ("approved", "Да"),
+        ("not_approved", "Нет"),
+        ("unknown", "Не определён"),
+    )
+    options = "".join(
+        f"<option value='{key}'{' selected' if select_status == key else ''}>{label}</option>"
+        for key, label in filters
+    )
+    channel_options = "".join(
+        f"<option value='{key}'{' selected' if select_channel == key else ''}>{label}</option>"
+        for key, label in (("all", "Все"), ("stable", "Stable"), ("dev", "Dev"))
+    )
+    rows = "".join(
+        "<tr>"
+        f"<td><code>{html.escape(row['installation_id'][:8])}…</code></td>"
+        f"<td>{html.escape(row['app_version'])}</td>"
+        f"<td>{html.escape(row['release_channel'])}</td>"
+        f"<td>{html.escape(row['android_version'])}</td>"
+        f"<td>{html.escape(row['device_model'] or '—')}</td>"
+        f"<td>{row['account_count']}</td>"
+        f"<td>{html.escape(row['beta_status'])}</td>"
+        f"<td>{_fmt_ts(row['first_seen_at'])}</td>"
+        f"<td>{_fmt_ts(row['last_seen_at'])}</td>"
+        "</tr>"
+        for row in records
+    ) or "<tr><td colspan='9' class='muted'>Установки не найдены</td></tr>"
+    params = {"status": select_status, "channel": select_channel, "version": version}
+    pager = ""
+    if page > 1:
+        pager += f"<a class='btn secondary' href='/admin/analytics?{html.escape(urlencode({**params, 'page': page - 1}), quote=True)}'>← Назад</a> "
+    if page * 25 < total:
+        pager += f"<a class='btn secondary' href='/admin/analytics?{html.escape(urlencode({**params, 'page': page + 1}), quote=True)}'>Далее →</a>"
+    beta = summary["beta"]
+    beta_rows = [
+        {"name": name, "count": beta.get(name, 0)}
+        for name in ("approved", "not_approved", "unknown")
+    ]
+    daily_rows = "".join(
+        f"<tr><td>{html.escape(row['day'])}</td><td>{row['count']}</td></tr>"
+        for row in summary["daily"]
+    ) or "<tr><td colspan='2' class='muted'>Пока нет данных</td></tr>"
+    body = (
+        "<p class='muted'>Статистика по установкам, не по уникальным людям. "
+        "Сырые Telegram ID не сохраняются в аналитике. "
+        "Бета-статус старше 24 часов считается неизвестным.</p>"
+        "<div class='kpi-strip'>"
+        f"<div class='kpi'><b>{value(summary['total'])}</b><span>Всего установок</span></div>"
+        f"<div class='kpi'><b>{value(summary['dau'])}</b><span>За 24 часа</span></div>"
+        f"<div class='kpi'><b>{value(summary['wau'])}</b><span>За 7 дней</span></div>"
+        f"<div class='kpi'><b>{value(summary['mau'])}</b><span>За 30 дней</span></div>"
+        f"<div class='kpi'><b>{value(summary['new_30d'])}</b><span>Новых за 30 дней</span></div>"
+        f"<div class='kpi'><b>{value(summary['account_slots'])}</b><span>Аккаунтов на установках</span></div>"
+        "</div>"
+        + small_table("Участие в бета-тесте", beta_rows)
+        + small_table("Версии клиента", summary["versions"])
+        + small_table("Каналы", summary["channels"])
+        + small_table("Android", summary["android"])
+        + f"<h2>Активность по дням</h2><table><tr><th>День (UTC)</th><th>Установки</th></tr>{daily_rows}</table>"
+        "<h2>Установки</h2><form class='form-row' method='get' action='/admin/analytics'>"
+        f"<div class='field'><label>Бета-тестер?</label><select name='status'>{options}</select></div>"
+        f"<div class='field'><label>Канал</label><select name='channel'>{channel_options}</select></div>"
+        f"<div class='field'><label>Версия</label><input name='version' maxlength='40' value='{html.escape(version, quote=True)}'></div>"
+        "<button class='btn secondary' type='submit'>Фильтр</button></form>"
+        f"<p class='muted'>Показано: {len(records)} из {total} · страница {page}</p>"
+        "<div class='table-scroll'><table><thead><tr>"
+        "<th>ID установки</th><th>Версия</th><th>Канал</th><th>Android</th>"
+        "<th>Модель</th><th>Аккаунты</th><th>Бета-тестер?</th>"
+        "<th>Первый запуск</th><th>Активность</th>"
+        f"</tr></thead><tbody>{rows}</tbody></table></div><p>{pager}</p>"
+    )
+    return _page("Аналитика BeyGram", body)
 
 
 # --- Отчёты -----------------------------------------------------------------

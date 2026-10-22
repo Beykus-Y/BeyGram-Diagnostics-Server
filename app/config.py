@@ -94,6 +94,13 @@ class Settings(BaseSettings):
     worker_lease_seconds: int = 180
     worker_backoff_base_seconds: int = 15
 
+    # --- Anonymous installation analytics (independent from bug reports) -------
+    accept_analytics: bool = True
+    analytics_retention_days: int = 90
+    rl_analytics_ip_per_hour: int = 180
+    rl_analytics_global_per_day: int = 30000
+    rl_analytics_registrations_per_day: int = 20
+
     # --- Хранение / обслуживание --------------------------------------------
     retention_days: int = 30
     audit_retention_days: int = 60

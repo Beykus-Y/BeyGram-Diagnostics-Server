@@ -23,7 +23,7 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _DDL_V1 = """
 CREATE TABLE IF NOT EXISTS allowlist (
@@ -109,7 +109,42 @@ ALTER TABLE reports ADD COLUMN claim_version INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE reports ADD COLUMN delivered_parts INTEGER NOT NULL DEFAULT 0;
 """
 
-_MIGRATIONS: tuple[tuple[int, str], ...] = ((1, _DDL_V1), (2, _DDL_V2))
+_DDL_V3 = """
+CREATE TABLE analytics_installations (
+    installation_id      TEXT PRIMARY KEY,
+    token_hash           TEXT NOT NULL,
+    sync_revision        INTEGER NOT NULL,
+    first_seen_at        REAL NOT NULL,
+    last_seen_at         REAL NOT NULL,
+    app_version          TEXT NOT NULL,
+    app_version_code     INTEGER NOT NULL,
+    release_channel      TEXT NOT NULL CHECK (release_channel IN ('stable', 'dev')),
+    android_version      TEXT NOT NULL,
+    device_model         TEXT,
+    account_count        INTEGER NOT NULL CHECK (account_count BETWEEN 0 AND 20),
+    beta_status          TEXT NOT NULL CHECK (beta_status IN ('approved', 'not_approved', 'unknown')),
+    last_beta_checked_at REAL
+);
+CREATE INDEX idx_analytics_last_seen ON analytics_installations(last_seen_at);
+CREATE INDEX idx_analytics_version ON analytics_installations(app_version);
+CREATE TABLE analytics_versions (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    installation_id      TEXT NOT NULL REFERENCES analytics_installations(installation_id) ON DELETE CASCADE,
+    app_version          TEXT NOT NULL,
+    app_version_code     INTEGER NOT NULL,
+    release_channel      TEXT NOT NULL,
+    recorded_at          REAL NOT NULL
+);
+CREATE INDEX idx_analytics_versions_installation ON analytics_versions(installation_id, recorded_at);
+CREATE TABLE analytics_activity_days (
+    installation_id      TEXT NOT NULL REFERENCES analytics_installations(installation_id) ON DELETE CASCADE,
+    day                  TEXT NOT NULL,
+    PRIMARY KEY (installation_id, day)
+);
+CREATE INDEX idx_analytics_activity_day ON analytics_activity_days(day);
+"""
+
+_MIGRATIONS: tuple[tuple[int, str], ...] = ((1, _DDL_V1), (2, _DDL_V2), (3, _DDL_V3))
 
 
 class Database:
