@@ -253,7 +253,7 @@ def test_android_model_accepts_unicode_and_parentheses(settings):
 
 
 def test_v3_migration_recovers_from_stale_schema_version(tmp_db_path):
-    from app.db import Database, SCHEMA_VERSION
+    from app.db import SCHEMA_VERSION, Database
 
     original = Database(tmp_db_path)
     original.connect()
