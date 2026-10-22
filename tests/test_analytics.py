@@ -248,7 +248,7 @@ def test_android_model_accepts_unicode_and_parentheses(settings):
         payload["device_model"] = "Модель (特殊) 5G"
         assert send(client, payload, token).status_code == 200
         payload["revision"] = 3
-        payload["device_model"] = "model\\nspoof"
+        payload["device_model"] = "model\nspoof"
         assert send(client, payload, token).status_code == 422
 
 
