@@ -40,7 +40,7 @@ def test_register_without_account_or_bot(settings):
         first = send(client, payload, token)
         assert first.status_code == 200, first.text
         assert first.json() == {
-            "registered": True, "updated": True, "beta_status": "unknown"
+            "registered": True, "updated": True
         }
         replay = send(client, payload, token)
         assert replay.status_code == 200
@@ -78,14 +78,17 @@ def test_allowlist_beta_status_without_persisting_ids(settings):
         with db.transaction() as conn:
             allowlist.add(conn, 87654321)
         payload["telegram_user_ids"] = [12345678, 87654321]
-        assert send(client, payload, token).json()["beta_status"] == "approved"
+        assert send(client, payload, token).status_code == 200
+        assert db.query_one("SELECT beta_status FROM analytics_installations")[0] == "approved"
         with db.transaction() as conn:
             allowlist.revoke(conn, 87654321)
         payload["revision"] = 2
-        assert send(client, payload, token).json()["beta_status"] == "not_approved"
+        assert send(client, payload, token).status_code == 200
+        assert db.query_one("SELECT beta_status FROM analytics_installations")[0] == "not_approved"
         payload["revision"] = 3
         payload["telegram_user_ids"] = [12345678]
-        assert send(client, payload, token).json()["beta_status"] == "unknown"
+        assert send(client, payload, token).status_code == 200
+        assert db.query_one("SELECT beta_status FROM analytics_installations")[0] == "unknown"
         # TG identifiers are absent even as strings in analytics tables.
         for table in ("analytics_installations", "analytics_activity_days", "analytics_versions"):
             rows = db.query_all(f"SELECT * FROM {table}")
@@ -133,7 +136,8 @@ def test_no_account_is_unknown_even_with_active_allowlist(settings):
         with client.app.state.context.db.transaction() as conn:
             allowlist.add(conn, 87654321)
         token, payload = generate_nonce(), request_payload()
-        assert send(client, payload, token).json()["beta_status"] == "unknown"
+        assert send(client, payload, token).status_code == 200
+        assert client.app.state.context.db.query_one("SELECT beta_status FROM analytics_installations")[0] == "unknown"
 
 
 def test_registration_rate_limit_does_not_block_existing(settings):
@@ -170,7 +174,7 @@ def test_admin_dashboard_private_filters_and_no_ids(settings):
         )
         with client.app.state.context.db.transaction() as conn:
             allowlist.add(conn, 912345678)
-        assert send(client, payload, token).json()["beta_status"] == "approved"
+        assert send(client, payload, token).status_code == 200
         resp = client.get("/admin/analytics?status=approved&channel=stable")
         assert resp.status_code == 200
         assert "Аналитика BeyGram" in resp.text

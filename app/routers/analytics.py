@@ -90,7 +90,7 @@ async def sync_installation(request: Request, payload: SyncIn) -> dict:
                 if not ok:
                     raise rate_limited(max(1, int(delay)), "Registration rate limit reached.")
             try:
-                created, accepted, beta = analytics.upsert(
+                created, accepted, _beta = analytics.upsert(
                     conn, installation_id=payload.installation_id, digest=digest,
                     revision=payload.revision, version=payload.app_version,
                     version_code=payload.app_version_code, channel=payload.release_channel,
@@ -100,7 +100,7 @@ async def sync_installation(request: Request, payload: SyncIn) -> dict:
                 )
             except PermissionError:
                 raise unauthorized() from None
-            return {"registered": created, "updated": accepted, "beta_status": beta}
+            return {"registered": created, "updated": accepted}
 
     return await ctx.db.run(work)
 

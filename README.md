@@ -341,8 +341,10 @@ can forge IDs, this indicator is **not trusted authorization**, and clients
 are never blocked for being unapproved. No lookup results for individual IDs
 are returned.
 
-The response is `{"registered":true,"updated":true,"beta_status":"unknown"}`
-on first registration without logged-in accounts. Each later sync uses the
+The response is `{"registered":true,"updated":true}`
+on first registration without logged-in accounts. Beta status stays
+**server-side only**: an API response must not reveal allowlist membership,
+even for a single-account submission (avoid an enumeration oracle). Each later sync uses the
 same ID and secret, with a **strictly increasing locally persisted revision**.
 Equal/older revisions do not overwrite state or insert version history.
 A real upgrade or downgrade is recorded only once per applied version change.
