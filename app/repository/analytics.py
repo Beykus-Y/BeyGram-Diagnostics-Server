@@ -10,10 +10,13 @@ from datetime import UTC, datetime, timedelta
 from ..repository import allowlist
 
 
-def token_digest(pepper: str, token: str) -> str:
-    return hmac.new(
-        pepper.encode("utf-8"), ("analytics-install:" + token).encode("ascii"), hashlib.sha256
-    ).hexdigest()
+def token_digest(token: str) -> str:
+    """Stable digest of a client-generated random 256-bit credential.
+
+    Installation credentials must outlive rotations of report NONCE_PEPPER.
+    A domain-separated SHA-256 digest is safe for high-entropy random secrets.
+    """
+    return hashlib.sha256(b"beygram-install-credential-v1:" + token.encode("ascii")).hexdigest()
 
 
 def beta_status(conn: sqlite3.Connection, account_count: int, user_ids: list[int] | None) -> str:

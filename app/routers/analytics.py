@@ -17,7 +17,7 @@ from ..util import is_uuid4, now
 router = APIRouter(prefix="/analytics", tags=["analytics"])
 _VERSION = Annotated[str, Field(min_length=1, max_length=40, pattern=r"^[A-Za-z0-9._+\-]+$")]
 _OS = Annotated[str, Field(min_length=1, max_length=40, pattern=r"^[A-Za-z0-9 ._\-]+$")]
-_DEVICE = Annotated[str, Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9 ._+\-]+$")]
+_DEVICE = Annotated[str, Field(min_length=1, max_length=80)]
 _USER_ID = Annotated[int, Field(strict=True, ge=1, le=9223372036854775807)]
 
 
@@ -34,6 +34,13 @@ class SyncIn(BaseModel):
     account_count: int = Field(strict=True, ge=0, le=20)
     telegram_user_ids: list[_USER_ID] | None = Field(default=None, max_length=20)
 
+    @field_validator("device_model")
+    @classmethod
+    def check_device_model(cls, value: str | None) -> str | None:
+        if value is not None and not value.isprintable():
+            raise ValueError("device_model must be printable")
+        return value
+
     @field_validator("installation_id")
     @classmethod
     def check_uuid(cls, value: str) -> str:
@@ -44,7 +51,7 @@ class SyncIn(BaseModel):
 
 def _credential(request: Request) -> str:
     header = request.headers.get("authorization", "")
-    match = re.fullmatch(r"Bearer ([A-Za-z0-9_-]{43})", header)
+    match = re.fullmatch(r"Bearer\s+([A-Za-z0-9_-]{43})", header.strip(), flags=re.IGNORECASE)
     if not match:
         raise unauthorized()
     token = match.group(1)
@@ -62,7 +69,7 @@ async def sync_installation(request: Request, payload: SyncIn) -> dict:
     settings = ctx.settings
     if not settings.accept_analytics:
         raise ApiError("analytics_disabled", "Analytics ingestion is disabled.", 503)
-    digest = analytics.token_digest(settings.nonce_pepper, _credential(request))
+    digest = analytics.token_digest(_credential(request))
     ip_digest = hash_ip(settings.nonce_pepper, client_ip(request, settings))
     timestamp = now()
 
@@ -110,8 +117,9 @@ async def delete_installation(request: Request, installation_id: str) -> dict:
     """Delete own installation with its secret, also when intake is disabled."""
     if not is_uuid4(installation_id):
         raise unauthorized()
+    installation_id = installation_id.lower()
     ctx = request.app.state.context
-    digest = analytics.token_digest(ctx.settings.nonce_pepper, _credential(request))
+    digest = analytics.token_digest(_credential(request))
 
     def work() -> None:
         with ctx.db.transaction() as conn:

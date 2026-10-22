@@ -209,3 +209,63 @@ def test_no_analytics_registration_token_leaks_into_reports(settings):
         assert client.app.state.context.db.query_one(
             "SELECT COUNT(*) FROM nonces"
         )[0] == 0
+
+
+def test_credentials_survive_report_pepper_rotation(settings):
+    with TestClient(create_app(settings)) as client:
+        token, payload = generate_nonce(), request_payload()
+        assert send(client, payload, token).status_code == 200
+        settings.nonce_pepper = "rotated-pepper-at-least-thirty-two-chars"
+        payload["revision"] = 2
+        assert send(client, payload, token).status_code == 200
+        deleted = client.delete(
+            f"/api/v1/analytics/installations/{payload['installation_id']}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert deleted.status_code == 200
+
+
+def test_uppercase_deletion_and_case_insensitive_bearer(settings):
+    with TestClient(create_app(settings)) as client:
+        token, payload = generate_nonce(), request_payload()
+        response = client.post(
+            "/api/v1/analytics/sync", json=payload,
+            headers={"Authorization": f"bearer {token}"},
+        )
+        assert response.status_code == 200
+        deleted = client.delete(
+            f"/api/v1/analytics/installations/{payload['installation_id'].upper()}",
+            headers={"Authorization": f"BEARER {token}"},
+        )
+        assert deleted.status_code == 200
+
+
+def test_android_model_accepts_unicode_and_parentheses(settings):
+    with TestClient(create_app(settings)) as client:
+        token, payload = generate_nonce(), request_payload(device_model="moto g(7) power")
+        assert send(client, payload, token).status_code == 200
+        payload["revision"] = 2
+        payload["device_model"] = "Модель (特殊) 5G"
+        assert send(client, payload, token).status_code == 200
+        payload["revision"] = 3
+        payload["device_model"] = "model\\nspoof"
+        assert send(client, payload, token).status_code == 422
+
+
+def test_v3_migration_recovers_from_stale_schema_version(tmp_db_path):
+    from app.db import Database, SCHEMA_VERSION
+
+    original = Database(tmp_db_path)
+    original.connect()
+    assert SCHEMA_VERSION == 3
+    original.connection.execute("UPDATE schema_version SET version=2")
+    original.close()
+    recovered = Database(tmp_db_path)
+    try:
+        recovered.connect()
+        assert recovered.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 3
+        assert recovered.connection.execute(
+            "SELECT COUNT(*) FROM analytics_installations"
+        ).fetchone()[0] == 0
+    finally:
+        recovered.close()

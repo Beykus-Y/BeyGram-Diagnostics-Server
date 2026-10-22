@@ -110,7 +110,7 @@ ALTER TABLE reports ADD COLUMN delivered_parts INTEGER NOT NULL DEFAULT 0;
 """
 
 _DDL_V3 = """
-CREATE TABLE analytics_installations (
+CREATE TABLE IF NOT EXISTS analytics_installations (
     installation_id      TEXT PRIMARY KEY,
     token_hash           TEXT NOT NULL,
     sync_revision        INTEGER NOT NULL,
@@ -125,9 +125,9 @@ CREATE TABLE analytics_installations (
     beta_status          TEXT NOT NULL CHECK (beta_status IN ('approved', 'not_approved', 'unknown')),
     last_beta_checked_at REAL
 );
-CREATE INDEX idx_analytics_last_seen ON analytics_installations(last_seen_at);
-CREATE INDEX idx_analytics_version ON analytics_installations(app_version);
-CREATE TABLE analytics_versions (
+CREATE INDEX IF NOT EXISTS idx_analytics_last_seen ON analytics_installations(last_seen_at);
+CREATE INDEX IF NOT EXISTS idx_analytics_version ON analytics_installations(app_version);
+CREATE TABLE IF NOT EXISTS analytics_versions (
     id                   INTEGER PRIMARY KEY AUTOINCREMENT,
     installation_id      TEXT NOT NULL REFERENCES analytics_installations(installation_id) ON DELETE CASCADE,
     app_version          TEXT NOT NULL,
@@ -135,13 +135,13 @@ CREATE TABLE analytics_versions (
     release_channel      TEXT NOT NULL,
     recorded_at          REAL NOT NULL
 );
-CREATE INDEX idx_analytics_versions_installation ON analytics_versions(installation_id, recorded_at);
-CREATE TABLE analytics_activity_days (
+CREATE INDEX IF NOT EXISTS idx_analytics_versions_installation ON analytics_versions(installation_id, recorded_at);
+CREATE TABLE IF NOT EXISTS analytics_activity_days (
     installation_id      TEXT NOT NULL REFERENCES analytics_installations(installation_id) ON DELETE CASCADE,
     day                  TEXT NOT NULL,
     PRIMARY KEY (installation_id, day)
 );
-CREATE INDEX idx_analytics_activity_day ON analytics_activity_days(day);
+CREATE INDEX IF NOT EXISTS idx_analytics_activity_day ON analytics_activity_days(day);
 """
 
 _MIGRATIONS: tuple[tuple[int, str], ...] = ((1, _DDL_V1), (2, _DDL_V2), (3, _DDL_V3))
@@ -216,16 +216,18 @@ class Database:
             if version <= current:
                 continue
             log.info("applying migration", extra={"version": version})
-            # executescript сам управляет транзакцией (неявный COMMIT перед
-            # выполнением), поэтому его нельзя оборачивать в BEGIN IMMEDIATE.
-            # DDL в SQLite транзакционен, поэтому при падении на середине
-            # схема не будет помечена как применённая.
-            conn.executescript("BEGIN;\n" + ddl + "\nCOMMIT;")
-            if row is None:
-                conn.execute("INSERT INTO schema_version(version) VALUES (?)", (version,))
-                row = True
-            else:
-                conn.execute("UPDATE schema_version SET version = ?", (version,))
+            # Commit schema version together with DDL, never in a second transaction.
+            version_sql = (
+                f"INSERT INTO schema_version(version) VALUES ({version});"
+                if row is None else f"UPDATE schema_version SET version = {version};"
+            )
+            try:
+                conn.executescript("BEGIN IMMEDIATE;\n" + ddl + "\n" + version_sql + "\nCOMMIT;")
+            except Exception:
+                with suppress(sqlite3.OperationalError):
+                    conn.execute("ROLLBACK")
+                raise
+            row = True
             current = version
 
     # --- Низкоуровневый доступ ----------------------------------------------
