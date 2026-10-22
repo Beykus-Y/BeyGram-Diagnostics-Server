@@ -389,9 +389,10 @@ async def analytics_page(
             db.connection, at=timestamp, status=status, channel=channel,
             version=version, page=page, page_size=25,
         )
-        return summary, records, total
+        updates = analytics_storage.recent_updates(db.connection)
+        return summary, records, total, updates
 
-    summary, records, total = await db.run(read)
+    summary, records, total, updates = await db.run(read)
 
     def value(number: int) -> str:
         return str(number)
@@ -448,6 +449,15 @@ async def analytics_page(
         f"<tr><td>{html.escape(row['day'])}</td><td>{row['count']}</td></tr>"
         for row in summary["daily"]
     ) or "<tr><td colspan='2' class='muted'>Пока нет данных</td></tr>"
+    update_rows = "".join(
+        "<tr>"
+        f"<td><code>{html.escape(row['installation_id'][:8])}…</code></td>"
+        f"<td>{html.escape(row['previous_version'])}</td>"
+        f"<td>{html.escape(row['current_version'])}</td>"
+        f"<td>{_fmt_ts(row['recorded_at'])}</td>"
+        "</tr>"
+        for row in updates
+    ) or "<tr><td colspan='4' class='muted'>Пока нет обновлений</td></tr>"
     body = (
         "<p class='muted'>Статистика по установкам, не по уникальным людям. "
         "Сырые Telegram ID не сохраняются в аналитике. "
@@ -465,6 +475,7 @@ async def analytics_page(
         + small_table("Каналы", summary["channels"])
         + small_table("Android", summary["android"])
         + f"<h2>Активность по дням</h2><table><tr><th>День (UTC)</th><th>Установки</th></tr>{daily_rows}</table>"
+        + f"<h2>Последние обновления</h2><table><tr><th>Установка</th><th>Было</th><th>Стало</th><th>Когда</th></tr>{update_rows}</table>"
         "<h2>Установки</h2><form class='form-row' method='get' action='/admin/analytics'>"
         f"<div class='field'><label>Бета-тестер?</label><select name='status'>{options}</select></div>"
         f"<div class='field'><label>Канал</label><select name='channel'>{channel_options}</select></div>"

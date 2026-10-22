@@ -175,6 +175,26 @@ def dashboard(conn: sqlite3.Connection, *, at: float) -> dict:
     return result
 
 
+def recent_updates(conn: sqlite3.Connection, limit: int = 30) -> list[dict]:
+    """Actual version transitions, not initial installs or replayed syncs."""
+    return [
+        dict(row) for row in conn.execute(
+            """SELECT installation_id, previous_version, current_version, recorded_at
+               FROM (
+                 SELECT installation_id,
+                        app_version || ' (' || app_version_code || ')' AS current_version,
+                        LAG(app_version || ' (' || app_version_code || ')') OVER
+                          (PARTITION BY installation_id ORDER BY id) AS previous_version,
+                        recorded_at
+                   FROM analytics_versions
+               )
+               WHERE previous_version IS NOT NULL AND previous_version != current_version
+               ORDER BY recorded_at DESC LIMIT ?""",
+            (limit,),
+        )
+    ]
+
+
 def installations(
     conn: sqlite3.Connection, *, at: float, status: str, channel: str, version: str,
     page: int, page_size: int = 25,
