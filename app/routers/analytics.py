@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..dependencies import client_ip
 from ..errors import ApiError, rate_limited, unauthorized
-from ..repository import analytics as storage, rate_limit
+from ..repository import analytics, rate_limit
 from ..security import hash_ip, validate_nonce
 from ..util import is_uuid4, now
 
@@ -62,7 +62,7 @@ async def sync_installation(request: Request, payload: SyncIn) -> dict:
     settings = ctx.settings
     if not settings.accept_analytics:
         raise ApiError("analytics_disabled", "Analytics ingestion is disabled.", 503)
-    digest = storage.token_digest(settings.nonce_pepper, _credential(request))
+    digest = analytics.token_digest(settings.nonce_pepper, _credential(request))
     ip_digest = hash_ip(settings.nonce_pepper, client_ip(request, settings))
     timestamp = now()
 
@@ -90,7 +90,7 @@ async def sync_installation(request: Request, payload: SyncIn) -> dict:
                 if not ok:
                     raise rate_limited(max(1, int(delay)), "Registration rate limit reached.")
             try:
-                created, accepted, beta = storage.upsert(
+                created, accepted, beta = analytics.upsert(
                     conn, installation_id=payload.installation_id, digest=digest,
                     revision=payload.revision, version=payload.app_version,
                     version_code=payload.app_version_code, channel=payload.release_channel,
@@ -111,11 +111,11 @@ async def delete_installation(request: Request, installation_id: str) -> dict:
     if not is_uuid4(installation_id):
         raise unauthorized()
     ctx = request.app.state.context
-    digest = storage.token_digest(ctx.settings.nonce_pepper, _credential(request))
+    digest = analytics.token_digest(ctx.settings.nonce_pepper, _credential(request))
 
     def work() -> None:
         with ctx.db.transaction() as conn:
-            if not storage.erase(conn, installation_id, digest):
+            if not analytics.erase(conn, installation_id, digest):
                 raise unauthorized()
 
     await ctx.db.run(work)
