@@ -18,7 +18,7 @@ import logging
 from ..admin_sessions import prune_expired as prune_expired_sessions
 from ..config import Settings
 from ..db import Database
-from ..repository import audit, nonces, rate_limit, reports
+from ..repository import analytics, audit, nonces, rate_limit, reports
 from ..util import now
 
 log = logging.getLogger(__name__)
@@ -66,6 +66,9 @@ async def _tick(ctx, settings: Settings, *, last_checkpoint: float) -> float:
             )
             removed_rate = rate_limit.prune(conn, keep_seconds=_RATE_KEEP_SECONDS, at=ts)
             removed_sessions = prune_expired_sessions(conn, at=ts)
+            removed_analytics = analytics.prune(
+                conn, at=ts, retention_days=settings.analytics_retention_days
+            )
             return {
                 "expired_nonces": expired,
                 "removed_nonces": removed_nonces,
@@ -74,6 +77,7 @@ async def _tick(ctx, settings: Settings, *, last_checkpoint: float) -> float:
                 "removed_audit": removed_audit,
                 "removed_rate_events": removed_rate,
                 "removed_admin_sessions": removed_sessions,
+                "removed_analytics_installations": removed_analytics,
                 "queue_depth": reports.queue_depth(conn),
                 "queue": reports.queue_stats(conn),
                 "nonce_states": nonces.count_by_state(conn),
@@ -83,7 +87,7 @@ async def _tick(ctx, settings: Settings, *, last_checkpoint: float) -> float:
 
     cleaned = sum(
         int(result.get(key, 0))  # type: ignore[arg-type]
-        for key in ("removed_nonces", "removed_reports", "removed_audit", "removed_rate_events")
+        for key in ("removed_nonces", "removed_reports", "removed_audit", "removed_rate_events", "removed_analytics_installations")
     )
     if cleaned:
         log.info("maintenance cleanup", extra=result)
