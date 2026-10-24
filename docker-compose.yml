@@ -15,6 +15,16 @@ services:
 
   # Local development helper: fake Bot API so the whole flow can be exercised
   # without touching real Telegram. Enabled with: docker compose --profile dev up
+  # Public website is an opt-in service. External nginx retains API/admin auth routing.
+  website:
+    profiles: ["website"]
+    build:
+      context: ./website
+    image: beygram-website:latest
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8082:80"
+
   fake-telegram:
     build: .
     image: beygram-report-server:latest
