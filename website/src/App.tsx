@@ -7,7 +7,7 @@ const COLORS = ['#1f5bff', '#c2593f', '#5b4bc4', '#2f8a7b', '#a9731d', '#3a78c2'
 const COLOR_LABELS = ['Фирменный синий','Терракота','Индиго','Бирюза','Охра','Небо','Роза'];
 const GITHUB = 'https://github.com/Beykus-Y/BeyGram';
 const CHANNEL = 'https://t.me/beygram_client';
-const LOGO = 'https://raw.githubusercontent.com/Beykus-Y/BeyGram/DEV/app/src/main/res/drawable-nodpi/app_logo.png';
+const LOGO = '/logo.webp';
 const ACCOUNTS = [{name:'Личный', detail:'Алиса · личный', avatar:'А', count:8, color:'#5b4bc4'}, {name:'Рабочий', detail:'Алиса · рабочий', avatar:'Р', count:13, color:'#2f8a7b'}, {name:'Тестовый', detail:'бета-сборки', avatar:'Т', count:0, color:'#c2593f'}] as const;
 const CHATSETS = [
   [{name:'Мария',message:'Да, смотри',time:'09:41',unread:2,color:'#c2593f'}, {name:'Дизайн-чат',message:'Скинули варианты акцента',time:'09:12',unread:5,color:'#5b4bc4'}, {name:'Бета-тестеры',message:'Новая сборка доступна',time:'08:50',unread:1,color:'#2f8a7b'}, {name:'Папа',message:'Позвони вечером',time:'вчера',unread:0,color:'#a9731d'}, {name:'Книжный клуб',message:'Голосовое · 0:42',time:'вчера',unread:0,color:'#3a78c2'}],
