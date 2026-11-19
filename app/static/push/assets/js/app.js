@@ -104,7 +104,13 @@
         showState(null, 'Привязка больше не действует. Создайте новый код в BeyGram.');
         return;
       }
-      showState(state, 'Не удалось получить статус: ' + error.message);
+      // Сеть недоступна: состояние на сервере неизвестно, так и показываем, не выдавая устаревшее за текущее.
+      el.support.hidden = true;
+      el.status.textContent = 'Нет связи с сервером';
+      el.detail.textContent = 'Статус обновится при следующей попытке.';
+      el.pair.hidden = true;
+      el.actions.hidden = false;
+      say('Не удалось получить статус: ' + error.message, 'bad');
     }
   }
 

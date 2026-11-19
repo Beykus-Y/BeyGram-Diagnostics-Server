@@ -4,6 +4,9 @@
 -> фиксация результата. Аренда (lease) не даёт двум итерациям взять одну задачу,
 а зависшая задача возвращается в очередь по истечении срока аренды.
 
+Результат записывается только для той попытки, которая держит аренду (номер попытки
+совпадает с claim). Поздний ответ после перевыдачи задачи не перезаписывает состояние.
+
 Журналы не содержат endpoint-ов, ключей и содержимого: только id задачи и код ответа.
 """
 
@@ -67,7 +70,7 @@ async def process_once(ctx: AppContext, client: httpx.AsyncClient, *, at: float 
 
     def _prepare() -> list[dict[str, Any]]:
         with ctx.push_db.transaction() as conn:  # type: ignore[union-attr]
-            service.maintain(conn, at=ts)
+            service.maintain(conn, at=ts, max_attempts=settings.push_worker_max_attempts)
             if not service.switch_enabled(conn, service.SWITCH_OUTBOUND):
                 return []
             return service.claim_due(conn, at=ts, limit=BATCH_SIZE)
@@ -93,7 +96,7 @@ async def _deliver(ctx: AppContext, client: httpx.AsyncClient, item: dict[str, A
     attempts = int(item["attempts"])
     try:
         if float(item["expires_at"]) <= now():
-            await _tx(ctx, service.settle_expired, delivery_id=delivery_id)
+            await _tx(ctx, service.settle_expired, delivery_id=delivery_id, attempts=attempts)
             return
 
         def _target() -> service.PushTarget | None:
@@ -106,6 +109,7 @@ async def _deliver(ctx: AppContext, client: httpx.AsyncClient, item: dict[str, A
                 service.settle_failure,
                 delivery_id=delivery_id,
                 registration_id=rid,
+                attempts=attempts,
                 status=None,
                 error="registration_inactive",
                 at=now(),
@@ -128,6 +132,19 @@ async def _deliver(ctx: AppContext, client: httpx.AsyncClient, item: dict[str, A
         }
         try:
             response = await client.post(target.endpoint, content=body, headers=headers)
+        except httpx.InvalidURL:
+            # Адрес, который httpx не разобрал, повторять бессмысленно. Текст исключения не логируем: он может содержать URL.
+            await _tx(
+                ctx,
+                service.settle_failure,
+                delivery_id=delivery_id,
+                registration_id=rid,
+                attempts=attempts,
+                status=None,
+                error="invalid_endpoint",
+                at=now(),
+            )
+            return
         except httpx.HTTPError:
             await _retry_or_fail(ctx, item, status=None, error="transport", retry_after=None)
             return
@@ -138,35 +155,52 @@ async def _deliver(ctx: AppContext, client: httpx.AsyncClient, item: dict[str, A
             service.settle_failure,
             delivery_id=delivery_id,
             registration_id=rid,
+            attempts=attempts,
             status=None,
             error="crypto_error",
             at=now(),
         )
-    except Exception:  # noqa: BLE001 - задача не должна зависнуть в inflight
-        log.exception("push delivery failed unexpectedly", extra={"delivery_id": delivery_id, "attempts": attempts})
+    except Exception as exc:  # noqa: BLE001 - задача не должна зависнуть в inflight
+        # В журнал попадает только класс исключения: текст может содержать адрес или фрагменты данных.
+        log.error(
+            "push delivery failed unexpectedly",
+            extra={"delivery_id": delivery_id, "attempts": attempts, "error_class": exc.__class__.__name__},
+        )
         await _retry_or_fail(ctx, item, status=None, error="internal", retry_after=None)
 
 
 async def _classify(ctx: AppContext, item: dict[str, Any], response: httpx.Response) -> None:
     delivery_id = int(item["id"])
     rid = str(item["registration_id"])
+    attempts = int(item["attempts"])
     status = response.status_code
     if status in (201, 202):
-        await _tx(ctx, service.settle_success, delivery_id=delivery_id, registration_id=rid, status=status, at=now())
+        await _tx(
+            ctx,
+            service.settle_success,
+            delivery_id=delivery_id,
+            registration_id=rid,
+            attempts=attempts,
+            status=status,
+            at=now(),
+        )
         return
     if status in (404, 410):
         # Провайдер больше не знает подписку: регистрация отзывается, PWA нужна новая привязка.
         def _gone() -> None:
             with ctx.push_db.transaction() as conn:  # type: ignore[union-attr]
-                service.revoke(conn, registration_id=rid, reason="provider_gone", at=now())
+                # Сначала фиксируем результат, пока аренда задачи действительна. Затем revoke снимает очередь,
+                # в том числе уже закрытую задачу не трогает: она уже не inflight.
                 service.settle_failure(
                     conn,
                     delivery_id=delivery_id,
                     registration_id=rid,
+                    attempts=attempts,
                     status=status,
                     error="provider_gone",
                     at=now(),
                 )
+                service.revoke(conn, registration_id=rid, reason="provider_gone", at=now())
 
         await ctx.push_db.run(_gone)  # type: ignore[union-attr]
         log.info("push subscription gone; registration revoked", extra={"status": status})
@@ -186,6 +220,7 @@ async def _classify(ctx: AppContext, item: dict[str, Any], response: httpx.Respo
         service.settle_failure,
         delivery_id=delivery_id,
         registration_id=rid,
+        attempts=attempts,
         status=status,
         error=f"provider_{status}",
         at=now(),
@@ -209,6 +244,7 @@ async def _retry_or_fail(
             service.settle_failure,
             delivery_id=delivery_id,
             registration_id=rid,
+            attempts=attempts,
             status=status,
             error=f"{error}_exhausted",
             at=now(),

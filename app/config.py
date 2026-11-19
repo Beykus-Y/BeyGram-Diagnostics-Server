@@ -135,6 +135,7 @@ class Settings(BaseSettings):
     rl_push_create_owner_per_day: int = 10
     rl_push_create_ip_per_day: int = 30
     rl_push_complete_per_15m: int = 6
+    rl_push_complete_ip_per_15m: int = 30
     rl_push_test_per_hour: int = 6
     rl_push_ingress_per_hour: int = 1200
     rl_push_ingress_global_per_hour: int = 60000

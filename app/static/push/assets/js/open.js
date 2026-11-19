@@ -5,7 +5,12 @@
 (function () {
   'use strict';
 
-  var requested = decodeURIComponent((location.hash || '').replace(/^#/, ''));
+  var requested = '';
+  try {
+    requested = decodeURIComponent((location.hash || '').replace(/^#/, ''));
+  } catch (error) {
+    requested = '';
+  }
   var link = BgCore.safeLink(requested);
   var button = document.getElementById('open');
   var hint = document.getElementById('hint');

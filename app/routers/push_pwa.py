@@ -98,7 +98,11 @@ async def push_asset(request: Request, asset_path: str) -> Response:
     if not _enabled(request):
         return _not_found()
     base = _ASSETS.resolve()
-    target = (base / asset_path).resolve()
+    try:
+        target = (base / asset_path).resolve()
+    except (ValueError, OSError):
+        # Например, нулевой байт в пути: это ошибка запроса, а не ресурс.
+        return _not_found()
     if base not in target.parents or not target.is_file():
         return _not_found()
     media_type = _ASSET_TYPES.get(target.suffix.lower())

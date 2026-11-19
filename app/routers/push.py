@@ -182,10 +182,21 @@ async def complete_registration(request: Request, registration_id: str, payload:
     ctx, runtime = _runtime(request)
     secret = _bearer(request)
     _check_id(registration_id)
+    ip = client_ip(request, ctx.settings) or "unknown"
+    # Лимит по IP не даёт заполнять rate_events случайными id. Лимит по паре (id, IP) не позволяет
+    # чужому адресу исчерпать попытки легитимного устройства.
+    await _limit(
+        ctx,
+        scope="push_complete_ip",
+        key=runtime.vault.digest("rate-complete-ip", ip),
+        limit=ctx.settings.rl_push_complete_ip_per_15m,
+        window_seconds=900,
+        message="Слишком много попыток. Подождите и повторите.",
+    )
     await _limit(
         ctx,
         scope="push_complete",
-        key=runtime.vault.digest("rate-complete", registration_id),
+        key=runtime.vault.digest("rate-complete", f"{registration_id}|{ip}"),
         limit=ctx.settings.rl_push_complete_per_15m,
         window_seconds=900,
         message="Слишком много попыток. Подождите и повторите.",
@@ -295,13 +306,23 @@ async def ingress(request: Request, capability: str) -> JSONResponse:
         raise ApiError(ERR_NOT_FOUND, "Ресурс не найден.", 404)
     if request.headers.get("content-encoding", "").strip().lower() != _SUPPORTED_ENCODING:
         raise ApiError("unsupported_encoding", "Поддерживается только aes128gcm.", 415)
-    body = await request.body()
+    # Размер проверяем до чтения тела: сначала заявленная длина, затем поток с обрывом на лимите.
+    limit = settings.push_max_ingress_bytes
+    declared = (request.headers.get("content-length") or "").strip()
+    if declared and (not declared.isascii() or not declared.isdigit() or len(declared) > 12 or int(declared) > limit):
+        raise body_too_large(limit)
+    chunks: list[bytes] = []
+    received = 0
+    async for chunk in request.stream():
+        received += len(chunk)
+        if received > limit:
+            raise body_too_large(limit)
+        chunks.append(chunk)
+    body = b"".join(chunks)
     if not body:
         raise payload_invalid(message="Пустое тело уведомления.")
-    if len(body) > settings.push_max_ingress_bytes:
-        raise body_too_large(settings.push_max_ingress_bytes)
     ttl_raw = request.headers.get("ttl", "").strip()
-    ttl = int(ttl_raw) if ttl_raw.isdigit() and len(ttl_raw) <= 9 else None
+    ttl = int(ttl_raw) if ttl_raw.isascii() and ttl_raw.isdigit() and len(ttl_raw) <= 9 else None
     await _limit(
         ctx,
         scope="push_ingress_global_ip",
