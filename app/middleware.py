@@ -31,6 +31,16 @@ CORRELATION_HEADER = "X-Request-ID"
 _CORRELATION_RE = re.compile(r"^[A-Za-z0-9._\-]{1,64}$")
 
 
+_PUSH_INGRESS_PREFIX = "/api/v1/push/ingress/"
+
+
+def _loggable_path(path: str) -> str:
+    """Скрывает capability push-ingress: он является секретом и не должен попадать в логи."""
+    if path.startswith(_PUSH_INGRESS_PREFIX):
+        return _PUSH_INGRESS_PREFIX + ":capability"
+    return path
+
+
 def _sanitize_request_id(raw: str | None) -> str | None:
     if not raw:
         return None
@@ -61,7 +71,7 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
         except ApiError as exc:
             response = error_response(exc, request_id)
         except Exception:  # noqa: BLE001 - наружу не должно утечь ничего
-            log.exception("unhandled error", extra={"request_id": request_id, "path": request.url.path})
+            log.exception("unhandled error", extra={"request_id": request_id, "path": _loggable_path(request.url.path)})
             response = JSONResponse(
                 status_code=500,
                 content={
@@ -81,7 +91,7 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
                 extra={
                     "request_id": request_id,
                     "method": request.method,
-                    "path": request.url.path,
+                    "path": _loggable_path(request.url.path),
                     "status": response.status_code,
                     "duration_ms": round(duration_ms, 2),
                     "client": _client_bucket(request),

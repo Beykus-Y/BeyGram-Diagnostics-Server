@@ -1,0 +1,199 @@
+/* BG Push: стили страниц PWA. Цвета заданы токенами; тёмная тема — по системной настройке или data-theme. */
+:root {
+  color-scheme: light dark;
+  --bg: #f4f5fb;
+  --surface: #ffffff;
+  --text: #1c1d26;
+  --muted: #5d6070;
+  --accent: #6357d9;
+  --accent-text: #ffffff;
+  --border: #d9dbe7;
+  --danger: #b3261e;
+  --ok: #1b6e3a;
+  --radius: 14px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #14151c;
+    --surface: #1d1f2a;
+    --text: #eceef8;
+    --muted: #a7abbf;
+    --accent: #8f84f0;
+    --accent-text: #14151c;
+    --border: #343747;
+    --danger: #ff8a80;
+    --ok: #7fd49a;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #14151c;
+  --surface: #1d1f2a;
+  --text: #eceef8;
+  --muted: #a7abbf;
+  --accent: #8f84f0;
+  --accent-text: #14151c;
+  --border: #343747;
+  --danger: #ff8a80;
+  --ok: #7fd49a;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  overflow-x: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
+}
+
+a {
+  color: var(--accent);
+}
+
+.wrap {
+  max-width: 520px;
+  margin: 0 auto;
+  padding: 24px 16px calc(24px + env(safe-area-inset-bottom));
+}
+
+h1 {
+  margin: 0 0 4px;
+  font-size: 24px;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.lead,
+.detail,
+.label {
+  margin: 0;
+  color: var(--muted);
+}
+
+.label {
+  margin-bottom: 6px;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.notice {
+  margin: 0 0 12px;
+  padding: 12px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.card {
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.status {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+input {
+  width: 100%;
+  min-height: 44px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 16px; /* меньше 16px вызывает масштабирование в Safari */
+}
+
+button,
+.button {
+  display: block;
+  width: 100%;
+  min-height: 44px;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+  text-align: center;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.55;
+}
+
+.primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+.danger {
+  color: var(--danger);
+}
+
+.code {
+  margin: 0;
+  padding: 12px;
+  border: 1px dashed var(--border);
+  border-radius: 12px;
+  background: var(--bg);
+  font: 15px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  user-select: all;
+  overflow-wrap: anywhere;
+}
+
+.steps {
+  margin: 0;
+  padding-left: 22px;
+}
+
+.steps li {
+  margin: 4px 0;
+}
+
+.message {
+  min-height: 1.45em;
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 15px;
+  overflow-wrap: anywhere;
+}
+
+.message.ok {
+  color: var(--ok);
+}
+
+.message.bad {
+  color: var(--danger);
+}

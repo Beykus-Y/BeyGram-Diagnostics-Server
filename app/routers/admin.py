@@ -33,9 +33,11 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from .. import admin_sessions
 from ..config import Settings
 from ..db import Database
+from ..push import service as push_service
 from ..repository import allowlist, audit, nonces, rate_limit, reports
 from ..security import constant_time_equals, hash_ip
 from ..services.settings_service import intake_enabled, set_intake_enabled
+from ..util import now
 
 log = logging.getLogger(__name__)
 
@@ -121,7 +123,7 @@ def _page(title: str, body: str) -> HTMLResponse:
             "<span class='brand-copy'>BeyGram<small>Diagnostics console</small></span></a>"
             "<nav class='nav-links' aria-label='Управление'>"
             "<a href='/admin'>Обзор</a><a href='/admin/reports'>Отчёты</a>"
-            "<a href='/admin/testers'>Доступ</a><a href='/admin/analytics'>Аналитика</a><a href='/admin/audit'>Аудит</a></nav>"
+            "<a href='/admin/testers'>Доступ</a><a href='/admin/analytics'>Аналитика</a><a href='/admin/push'>BG Push</a><a href='/admin/audit'>Аудит</a></nav>"
             "<form method='post' action='/admin/logout'>"
             "<button class='btn secondary' type='submit'>Выйти</button></form>"
             "</header><header class='page-header'>"
@@ -985,3 +987,161 @@ async def audit_page(request: Request) -> Response:
 
 
 __all__ = ["router"]
+
+
+# --- BG Push -----------------------------------------------------------------
+
+_PUSH_SWITCHES = {"ingress": push_service.SWITCH_INGRESS, "outbound": push_service.SWITCH_OUTBOUND}
+
+
+def _audit_push(db: Database, *, action: str, target: str, detail: dict[str, Any]) -> None:
+    with db.transaction() as conn:
+        audit.write(conn, actor="admin", action=action, target=target, detail=detail)
+
+
+def _valid_registration_id(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 22
+        and value.isascii()
+        and all(ch.isalnum() or ch in "-_" for ch in value)
+    )
+
+
+def _push_row_html(row: dict[str, Any], csrf: str) -> str:
+    rid = str(row["registration_id"])
+    state = str(row["state"])
+    action = ""
+    if state in {"active", "pending"}:
+        action = (
+            "<form class='inline' method='post' action='/admin/push/revoke'>"
+            f"<input type='hidden' name='csrf' value='{csrf}'>"
+            f"<input type='hidden' name='registration_id' value='{html.escape(rid)}'>"
+            "<button class='btn secondary' type='submit'>Отозвать</button></form>"
+        )
+    return (
+        "<tr>"
+        f"<td><code>{html.escape(rid[:8])}…</code></td>"
+        f"<td>{html.escape(state)}</td>"
+        f"<td>{html.escape(str(row['platform'] or '—'))}</td>"
+        f"<td>{html.escape(str(row['endpoint_host'] or '—'))}</td>"
+        f"<td>{_fmt_ts(row['created_at'])}</td>"
+        f"<td>{_fmt_ts(row['telegram_confirmed_at'])}</td>"
+        f"<td>{_fmt_ts(row['last_push_ok_at'])}</td>"
+        f"<td>{html.escape(str(row['last_push_error'] or '—'))}</td>"
+        f"<td>{action}</td>"
+        "</tr>"
+    )
+
+
+@router.get("/push")
+async def push_page(request: Request) -> Response:
+    ctx = request.app.state.context
+    settings: Settings = ctx.settings
+    guarded = _guard(request, settings, await _session(ctx, request))
+    if isinstance(guarded, Response):
+        return guarded
+    if not settings.enable_push or ctx.push_db is None:
+        return _page("BG Push", "<p>BG Push выключен (ENABLE_PUSH=false).</p>")
+    push_db: Database = ctx.push_db
+    at = now()
+    snapshot = await push_db.run(lambda: push_service.admin_snapshot(push_db.connection, at=at))
+    csrf = guarded[1]
+    health = snapshot["health"]
+
+    switch_html = ""
+    for label, key, enabled in (
+        ("Приём Telegram-уведомлений", "ingress", health["ingress_enabled"]),
+        ("Отправка на устройства", "outbound", health["outbound_enabled"]),
+    ):
+        switch_html += (
+            f"<p>{label}: {'включено' if enabled else '<b>выключено</b>'}</p>"
+            "<form class='inline' method='post' action='/admin/push/switch'>"
+            f"<input type='hidden' name='csrf' value='{csrf}'>"
+            f"<input type='hidden' name='channel' value='{key}'>"
+            f"<input type='hidden' name='action' value='{'off' if enabled else 'on'}'>"
+            f"<button class='btn' type='submit'>{'Выключить' if enabled else 'Включить'}</button></form>"
+        )
+
+    def _table(title: str, data: dict[str, Any], label: str) -> str:
+        rows = "".join(
+            f"<tr><td>{html.escape(str(k))}</td><td>{v}</td></tr>" for k, v in sorted(data.items())
+        ) or "<tr><td colspan='2' class='muted'>нет данных</td></tr>"
+        return f"<h2>{title}</h2><table><tr><th>{label}</th><th>кол-во</th></tr>{rows}</table>"
+
+    oldest = health["oldest_queued_age_seconds"]
+    recent_rows = "".join(_push_row_html(row, csrf) for row in snapshot["recent"]) or (
+        "<tr><td colspan='9' class='muted'>регистраций пока нет</td></tr>"
+    )
+    body = (
+        "<h2>Переключатели</h2>" + switch_html
+        + f"<p>Глубина очереди: {health['queue_depth']}; старейшая задача: "
+        f"{round(oldest) if oldest is not None else 0} c.</p>"
+        + _table("Очередь доставки", snapshot["queue"], "состояние")
+        + _table("Регистрации", snapshot["registrations"], "состояние")
+        + _table("Метрики за 7 дней", snapshot["counters_7d"], "метрика")
+        + "<h2>Последние регистрации</h2>"
+        "<p class='muted'>Адреса подписок, ключи и содержимое уведомлений не отображаются.</p>"
+        "<table><tr><th>id</th><th>состояние</th><th>платформа</th><th>провайдер</th><th>создана</th>"
+        "<th>Telegram</th><th>последний push</th><th>ошибка</th><th></th></tr>"
+        f"{recent_rows}</table>"
+    )
+    return _page("BG Push", body)
+
+
+@router.post("/push/switch")
+async def push_switch(request: Request) -> Response:
+    ctx = request.app.state.context
+    settings: Settings = ctx.settings
+    guarded = _guard(request, settings, await _session(ctx, request))
+    if isinstance(guarded, Response):
+        return guarded
+    form = dict(await request.form())
+    if not _check_csrf(guarded, form):
+        return _page("Ошибка", "<p class='bad'>Недействительный CSRF-токен.</p>")
+    channel = form.get("channel")
+    action = form.get("action")
+    if not isinstance(channel, str) or channel not in _PUSH_SWITCHES or action not in {"on", "off"}:
+        return _page("Ошибка", "<p class='bad'>Некорректное действие.</p>")
+    if ctx.push_db is None:
+        return _page("Ошибка", "<p class='bad'>BG Push выключен.</p>")
+    push_db: Database = ctx.push_db
+    switch_key = _PUSH_SWITCHES[channel]
+    enabled = action == "on"
+
+    def _toggle() -> None:
+        with push_db.transaction() as conn:
+            push_service.set_switch(conn, switch_key, enabled)
+
+    await push_db.run(_toggle)
+    await ctx.db.run(
+        lambda: _audit_push(ctx.db, action="push_switch", target=channel, detail={"enabled": enabled})
+    )
+    return RedirectResponse("/admin/push", status_code=303)
+
+
+@router.post("/push/revoke")
+async def push_revoke(request: Request) -> Response:
+    ctx = request.app.state.context
+    settings: Settings = ctx.settings
+    guarded = _guard(request, settings, await _session(ctx, request))
+    if isinstance(guarded, Response):
+        return guarded
+    form = dict(await request.form())
+    if not _check_csrf(guarded, form):
+        return _page("Ошибка", "<p class='bad'>Недействительный CSRF-токен.</p>")
+    rid = form.get("registration_id")
+    if not _valid_registration_id(rid) or ctx.push_db is None:
+        return _page("Ошибка", "<p class='bad'>Некорректная регистрация.</p>")
+    push_db: Database = ctx.push_db
+    at = now()
+
+    def _revoke() -> bool:
+        with push_db.transaction() as conn:
+            return push_service.revoke(conn, registration_id=str(rid), reason="revoked by admin", at=at)
+
+    changed = await push_db.run(_revoke)
+    await ctx.db.run(
+        lambda: _audit_push(ctx.db, action="push_revoke", target=str(rid), detail={"changed": changed})
+    )
+    return RedirectResponse("/admin/push", status_code=303)
