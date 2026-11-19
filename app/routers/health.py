@@ -97,6 +97,7 @@ async def readyz(ctx: ContextDep) -> dict[str, object]:
         if isinstance(age, int | float) and age > _STALE_WORKER_SECONDS:
             problems.append("queue not draining")
 
+    push_status = await _push_status(ctx, ts)
     return {
         "status": "degraded" if problems else "ok",
         "problems": problems,
@@ -110,6 +111,7 @@ async def readyz(ctx: ContextDep) -> dict[str, object]:
         "workers": workers,
         "version": __version__,
         "time": ts,
+        "push": push_status,
     }
 
 
@@ -124,3 +126,20 @@ def _is_stale(ctx: AppContext, name: str, ts: float) -> bool:
     if entry.last_success_at is None and ts - entry.started_at < _STALE_WORKER_SECONDS:
         return False
     return (ts - reference) > _STALE_WORKER_SECONDS
+
+
+async def _push_status(ctx: AppContext, ts: float) -> dict[str, object] | None:
+    """Статус BG Push отдельно от основного: выключенный или упавший push не роняет API."""
+    if not ctx.settings.enable_push or ctx.push_db is None:
+        return None
+    from ..push import service as push_service
+
+    snapshot = await ctx.push_db.run(lambda: push_service.health_snapshot(ctx.push_db.connection, at=ts))
+    problems: list[str] = []
+    if not ctx.worker_running("push-worker"):
+        problems.append("push-worker not running")
+    elif _is_stale(ctx, "push-worker", ts):
+        problems.append("push-worker stale")
+    if not snapshot["outbound_enabled"]:
+        problems.append("outbound disabled by kill switch")
+    return {"status": "degraded" if problems else "ok", "problems": problems, **snapshot}

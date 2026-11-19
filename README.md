@@ -300,6 +300,14 @@ CSRF обязателен для всех write-действий, rate limit н�
   автоматически (они и так живут ≤ 10 минут), но ротация требует перезапуска.
 
 
+## BG Push: уведомления для iOS PWA (опционально)
+
+Модуль выключен по умолчанию (`ENABLE_PUSH=false`). Он даёт уведомления на iPhone через установленную
+PWA без платной Apple Developer Program. Настройка, ключи, nginx, API и известные ограничения описаны в
+[docs/bg-push.md](docs/bg-push.md). На реальном iPhone модуль пока не проверен.
+
+Ключи создаются командой `python -m app.push.keygen /data/push`.
+
 ## Installation analytics (Issue #25)
 
 Separate minimal analytics for BeyGram installations. Unlike manual bug reports,
