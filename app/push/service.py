@@ -463,16 +463,23 @@ def claim_due(conn: sqlite3.Connection, *, at: float, limit: int) -> list[dict[s
     return claimed
 
 
-def settle_success(conn: sqlite3.Connection, *, delivery_id: int, registration_id: str, status: int, at: float) -> None:
-    conn.execute(
-        "UPDATE push_deliveries SET state = 'done', last_status = ?, last_error = NULL, lease_until = NULL WHERE id = ?",
-        (status, delivery_id),
+def settle_success(
+    conn: sqlite3.Connection, *, delivery_id: int, registration_id: str, attempts: int, status: int, at: float
+) -> bool:
+    """Фиксирует успех. Результат принимается только от текущей аренды: state inflight и тот же номер попытки."""
+    cursor = conn.execute(
+        """UPDATE push_deliveries SET state = 'done', last_status = ?, last_error = NULL, lease_until = NULL
+           WHERE id = ? AND state = 'inflight' AND attempts = ?""",
+        (status, delivery_id, attempts),
     )
+    if cursor.rowcount != 1:
+        return False
     conn.execute(
         "UPDATE push_registrations SET last_push_ok_at = ?, last_push_error = NULL, updated_at = ? WHERE registration_id = ?",
         (at, at, registration_id),
     )
     bump(conn, "outbound_accepted", at=at)
+    return True
 
 
 def settle_retry(
@@ -484,14 +491,18 @@ def settle_retry(
     error: str,
     at: float,
     retry_after: float | None = None,
-) -> None:
+) -> bool:
     delay = retry_after if retry_after is not None else min(MAX_BACKOFF_SECONDS, BASE_BACKOFF_SECONDS * 2 ** max(0, attempts - 1))
-    conn.execute(
+    cursor = conn.execute(
         """UPDATE push_deliveries SET state = 'queued', next_attempt_at = ?, last_status = ?,
-               last_error = ?, lease_until = NULL WHERE id = ?""",
-        (at + delay, status, error, delivery_id),
+               last_error = ?, lease_until = NULL
+           WHERE id = ? AND state = 'inflight' AND attempts = ?""",
+        (at + delay, status, error, delivery_id, attempts),
     )
+    if cursor.rowcount != 1:
+        return False
     bump(conn, "outbound_retry", at=at)
+    return True
 
 
 def settle_failure(
@@ -499,29 +510,36 @@ def settle_failure(
     *,
     delivery_id: int,
     registration_id: str,
+    attempts: int,
     status: int | None,
     error: str,
     at: float,
-) -> None:
-    conn.execute(
-        "UPDATE push_deliveries SET state = 'failed', last_status = ?, last_error = ?, lease_until = NULL WHERE id = ?",
-        (status, error, delivery_id),
+) -> bool:
+    cursor = conn.execute(
+        """UPDATE push_deliveries SET state = 'failed', last_status = ?, last_error = ?, lease_until = NULL
+           WHERE id = ? AND state = 'inflight' AND attempts = ?""",
+        (status, error, delivery_id, attempts),
     )
+    if cursor.rowcount != 1:
+        return False
     conn.execute(
         "UPDATE push_registrations SET last_push_error = ?, updated_at = ? WHERE registration_id = ?",
         (error, at, registration_id),
     )
     bump(conn, "outbound_failed", at=at)
+    return True
 
 
-def settle_expired(conn: sqlite3.Connection, *, delivery_id: int) -> None:
-    conn.execute(
-        "UPDATE push_deliveries SET state = 'expired', last_error = 'ttl', lease_until = NULL WHERE id = ?",
-        (delivery_id,),
+def settle_expired(conn: sqlite3.Connection, *, delivery_id: int, attempts: int) -> bool:
+    cursor = conn.execute(
+        """UPDATE push_deliveries SET state = 'expired', last_error = 'ttl', lease_until = NULL
+           WHERE id = ? AND state = 'inflight' AND attempts = ?""",
+        (delivery_id, attempts),
     )
+    return cursor.rowcount == 1
 
 
-def maintain(conn: sqlite3.Connection, *, at: float) -> dict[str, int]:
+def maintain(conn: sqlite3.Connection, *, at: float, max_attempts: int | None = None) -> dict[str, int]:
     """Истечение сроков, восстановление зависших лизов, очистка старых строк."""
     pending = conn.execute(
         "UPDATE push_registrations SET state = 'expired', updated_at = ? WHERE state = 'pending' AND pairing_expires_at <= ?",
@@ -532,6 +550,16 @@ def maintain(conn: sqlite3.Connection, *, at: float) -> dict[str, int]:
            WHERE state = 'queued' AND expires_at <= ?""",
         (at,),
     ).rowcount
+    exhausted = 0
+    if max_attempts is not None:
+        # Задача, чья аренда истекала уже max_attempts раз (например, процесс падал на ней), не повторяется бесконечно.
+        exhausted = conn.execute(
+            """UPDATE push_deliveries SET state = 'failed', last_error = 'lease_exhausted', lease_until = NULL
+               WHERE state = 'inflight' AND lease_until <= ? AND attempts >= ?""",
+            (at, max_attempts),
+        ).rowcount
+    for _ in range(exhausted):
+        bump(conn, "outbound_failed", at=at)
     recovered = conn.execute(
         """UPDATE push_deliveries SET state = 'queued', lease_until = NULL, next_attempt_at = ?
            WHERE state = 'inflight' AND lease_until <= ?""",
@@ -547,7 +575,12 @@ def maintain(conn: sqlite3.Connection, *, at: float) -> dict[str, int]:
     )
     rate_limit.prune(conn, keep_seconds=86400, at=at)
     conn.execute("DELETE FROM push_counters WHERE day < ?", (_day(at - COUNTER_RETENTION_DAYS * 86400),))
-    return {"pending_expired": pending, "deliveries_expired": expired, "deliveries_recovered": recovered}
+    return {
+        "pending_expired": pending,
+        "deliveries_expired": expired,
+        "deliveries_recovered": recovered,
+        "deliveries_exhausted": exhausted,
+    }
 
 
 # --- Снимки для health и админки (без идентификаторов подписок) -------------

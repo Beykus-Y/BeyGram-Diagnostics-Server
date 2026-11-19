@@ -5,7 +5,12 @@
 (function () {
   'use strict';
 
-  var raw = decodeURIComponent((location.hash || '').replace(/^#/, ''));
+  var raw = '';
+  try {
+    raw = decodeURIComponent((location.hash || '').replace(/^#/, ''));
+  } catch (error) {
+    raw = '';
+  }
   var valid = /^bgp1\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}$/.test(raw);
   var codeEl = document.getElementById('code');
   var copyButton = document.getElementById('copy');

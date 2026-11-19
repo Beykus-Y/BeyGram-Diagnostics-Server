@@ -37,7 +37,7 @@ def main(argv: list[str] | None = None) -> int:
         print("usage: python -m app.push.keygen <directory>", file=sys.stderr)
         return 2
     directory = Path(args[0])
-    directory.mkdir(parents=True, exist_ok=True)
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     vapid_path = directory / "vapid_private.pem"
     storage_path = directory / "storage.key"
     created_vapid = _write_private(vapid_path, generate_vapid_pem())

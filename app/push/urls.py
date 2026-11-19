@@ -57,7 +57,10 @@ def validate_endpoint(endpoint: str, allowed_hosts: tuple[str, ...]) -> str:
         raise EndpointError("endpoint port is not allowed")
     if parts.fragment:
         raise EndpointError("endpoint must not contain a fragment")
-    host = (parts.hostname or "").lower().rstrip(".")
+    host = (parts.hostname or "").lower()
+    if host.endswith("."):
+        # Точка в конце попадает в audience VAPID, провайдер такой audience отклоняет.
+        raise EndpointError("endpoint host must not end with a dot")
     if not host or not _HOST_RE.match(host):
         raise EndpointError("endpoint host is invalid")
     try:
