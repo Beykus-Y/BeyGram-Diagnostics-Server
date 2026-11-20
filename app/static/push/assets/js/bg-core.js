@@ -268,11 +268,11 @@
     if (CONTROL.indexOf(key) !== -1) return fallback(language, true);
     var m = /^(?:(CHAT|CHANNEL)_)?MESSAGE_([A-Z_]+)$/.exec(key);
     var missed = key === 'PHONE_CALL_MISSED' || key === 'CONF_CALL_MISSED';
-    if (!missed && (!m || (m[2] !== 'TEXT' && !Object.prototype.hasOwnProperty.call(MEDIA, m[2])))) return null;
-    var kind = missed ? 'MISSED_CALL' : m[2];
-    var group = !missed && m[1] === 'CHAT';
-    // CHAT_MESSAGE_NOTEXT has a different schema (group name only); keep it private.
-    if (group && kind === 'NOTEXT') return fallback(language, false);
+    var reaction = /^(CHAT_)?REACT_(TEXT|AUDIO|DOC|PHOTO|VIDEO|ROUND|STICKER|POLL|QUIZ)$/.exec(key);
+    if (data.custom && (data.custom.schedule === true || data.custom.schedule === 1 || data.custom.schedule === '1')) return fallback(language, true);
+    if (!missed && !reaction && (!m || (m[2] !== 'TEXT' && !Object.prototype.hasOwnProperty.call(MEDIA, m[2])))) return null;
+    var kind = missed ? 'MISSED_CALL' : reaction ? 'REACTION' : m[2];
+    var group = !missed && (reaction ? !!reaction[1] : m[1] === 'CHAT');
     var args = Array.isArray(data.loc_args) ? data.loc_args : [];
     var sender = clean(args[0], 100);
     var title = group ? clean(args[1], 100) : sender;
@@ -280,15 +280,18 @@
     var l = langIndex(language);
     var body;
     if (missed) body = ['Пропущенный звонок', 'Missed call'][l];
-    else if (kind === 'TEXT') body = clean(args[group ? 2 : 1], MAX_TEXT);
+    else if (reaction) {
+      var emoji = clean(args[group ? 2 : 1], 30);
+      body = ['Реакция на сообщение', 'Reaction to a message'][l] + (emoji ? ' ' + emoji : '');
+    } else if (kind === 'TEXT') body = clean(args[group ? 2 : 1], MAX_TEXT);
     else body = MEDIA[kind][l];
     if (!body) body = ['Новое сообщение', 'New message'][l];
     var ctx = telegramContext(data);
     // Current IPA accepts an internal PeerId, not raw Telegram identifiers.
     // Keep raw IDs local and use the safe chat-list link until native support is agreed.
-    var tag = !missed && ctx.account && ctx.peerType && ctx.peerId && ctx.messageId ?
+    var tag = !missed && !reaction && ctx.account && ctx.peerType && ctx.peerId && ctx.messageId ?
       ['tg', ctx.account, ctx.peerType, ctx.peerId, ctx.messageId].join(':') : '';
-    return { k: missed ? 'call' : 'msg', t: title, b: clean(group ? sender + ': ' + body : body, MAX_TEXT),
+    return { k: missed ? 'call' : reaction ? 'reaction' : 'msg', t: title, b: clean(group ? sender + ': ' + body : body, MAX_TEXT),
       link: OPEN_LINK, tag: tag, context: ctx, silent: ctx.silent, event: key };
   }
 
