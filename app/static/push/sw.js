@@ -1,8 +1,8 @@
 /*
- * BG Push: service worker, версия 4 (конверт aesgcm, см. bg-core.js). Обрабатывает только push и notificationclick.
+ * BG Push: service worker, версия 5 (конверт aesgcm, см. bg-core.js). Обрабатывает только push и notificationclick.
  * Кэширования и перехвата запросов нет: привязка и токены не должны попадать в кэш.
  */
-importScripts('/push/assets/js/bg-core.js', '/push/assets/js/bg-store.js');
+importScripts('/push/assets/js/bg-core.js?v=3', '/push/assets/js/bg-store.js');
 
 var REGISTRATIONS_PATH = '/api/v1/push/registrations/';
 
@@ -94,7 +94,7 @@ async function handlePush(event) {
     body: message.b,
     tag: message.k === 'control' ? 'bg-push-control' : message.tag || undefined,
     silent: message.silent === true || message.k === 'control',
-    data: { link: message.link },
+    data: { link: BgCore.safeLink(message.link) },
     icon: '/push/assets/icons/icon-192.png?v=2'
   });
 }

@@ -13,7 +13,7 @@ test('personal text, wrapped and flat payloads', () => {
     const result = parse(data);
     assert.equal(result.t, 'Alice');
     assert.equal(result.b, 'Привет 😀');
-    assert.equal(result.link, 'beygram://push/open');
+    assert.equal(result.link, 'beygram://push/open?v=2&account=123&kind=user&rawPeer=42&msg=7');
     assert.equal(result.tag, 'tg:123:user:42:7');
   }
 });

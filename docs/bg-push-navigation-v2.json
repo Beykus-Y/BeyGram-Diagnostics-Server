@@ -1,0 +1,292 @@
+{
+  "version": 2,
+  "cases": [
+    {
+      "name": "personal",
+      "input": "beygram://push/open?v=2&account=123&kind=user&rawPeer=456&msg=789",
+      "expectedLink": "beygram://push/open?v=2&account=123&kind=user&rawPeer=456&msg=789",
+      "navigation": {
+        "v": "2",
+        "account": "123",
+        "kind": "user",
+        "rawPeer": "456",
+        "msg": "789"
+      }
+    },
+    {
+      "name": "basic-group",
+      "input": "beygram://push/open?v=2&account=123&kind=chat&rawPeer=42&msg=7",
+      "expectedLink": "beygram://push/open?v=2&account=123&kind=chat&rawPeer=42&msg=7",
+      "navigation": {
+        "v": "2",
+        "account": "123",
+        "kind": "chat",
+        "rawPeer": "42",
+        "msg": "7"
+      }
+    },
+    {
+      "name": "channel",
+      "input": "beygram://push/open?v=2&account=123&kind=channel&rawPeer=42&msg=7",
+      "expectedLink": "beygram://push/open?v=2&account=123&kind=channel&rawPeer=42&msg=7",
+      "navigation": {
+        "v": "2",
+        "account": "123",
+        "kind": "channel",
+        "rawPeer": "42",
+        "msg": "7"
+      }
+    },
+    {
+      "name": "chat-only",
+      "input": "beygram://push/open?v=2&account=123&kind=channel&rawPeer=42",
+      "expectedLink": "beygram://push/open?v=2&account=123&kind=channel&rawPeer=42",
+      "navigation": {
+        "v": "2",
+        "account": "123",
+        "kind": "channel",
+        "rawPeer": "42"
+      }
+    },
+    {
+      "name": "lossless",
+      "input": "beygram://push/open?v=2&account=9007199254740993&kind=user&rawPeer=9007199254740995&msg=2147483647",
+      "expectedLink": "beygram://push/open?v=2&account=9007199254740993&kind=user&rawPeer=9007199254740995&msg=2147483647",
+      "navigation": {
+        "v": "2",
+        "account": "9007199254740993",
+        "kind": "user",
+        "rawPeer": "9007199254740995",
+        "msg": "2147483647"
+      }
+    },
+    {
+      "name": "max-int64",
+      "input": "beygram://push/open?v=2&account=9223372036854775807&kind=user&rawPeer=9223372036854775807&msg=1",
+      "expectedLink": "beygram://push/open?v=2&account=9223372036854775807&kind=user&rawPeer=9223372036854775807&msg=1",
+      "navigation": {
+        "v": "2",
+        "account": "9223372036854775807",
+        "kind": "user",
+        "rawPeer": "9223372036854775807",
+        "msg": "1"
+      }
+    },
+    {
+      "name": "permuted",
+      "input": "beygram://push/open?rawPeer=42&msg=7&kind=chat&account=123&v=2",
+      "expectedLink": "beygram://push/open?v=2&account=123&kind=chat&rawPeer=42&msg=7",
+      "navigation": {
+        "v": "2",
+        "account": "123",
+        "kind": "chat",
+        "rawPeer": "42",
+        "msg": "7"
+      }
+    },
+    {
+      "name": "legacy",
+      "input": "beygram://push/open?account=123&peer=456&msg=789",
+      "expectedLink": "beygram://push/open?account=123&peer=456&msg=789",
+      "navigation": null
+    },
+    {
+      "name": "bare",
+      "input": "beygram://push/open",
+      "expectedLink": "beygram://push/open",
+      "navigation": null
+    },
+    {
+      "name": "version",
+      "input": "beygram://push/open?v=3&account=123&kind=user&rawPeer=456&msg=789",
+      "expectedLink": "beygram://push/open",
+      "navigation": null
+    },
+    {
+      "name": "kind",
+      "input": "beygram://push/open?v=2&account=123&kind=secret&rawPeer=456&msg=789",
+      "expectedLink": "beygram://push/open",
+      "navigation": null
+    },
+    {
+      "name": "peer-0",
+      "input": "beygram://push/open?v=2&account=123&kind=user&rawPeer=0&msg=789",
+      "expectedLink": "beygram://push/open",
+      "navigation": null
+    },
+    {
+      "name": "peer--1",
+      "input": "beygram://push/open?v=2&account=123&kind=user&rawPeer=-1&msg=789",
+      "expectedLink": "beygram://push/open",
+      "navigation": null
+    },
+    {
+      "name": "peer-01",
+      "input": "beygram://push/open?v=2&account=123&kind=user&rawPeer=01&msg=789",
+      "expectedLink": "beygram://push/open",
+      "navigation": null
+    },
+    {
+      "name": "peer-9223372036854775808",
+      "input": "beygram://push/open?v=2&account=123&kind=user&rawPeer=9223372036854775808&msg=789",
+      "expectedLink": "beygram://push/open",
+      "navigation": null
+    },
+    {
+      "name": "peer-1e3",
+      "input": "beygram://push/open?v=2&account=123&kind=user&rawPeer=1e3&msg=789",
+      "expectedLink": "beygram://push/open",
+      "navigation": null
+    },
+    {
+      "name": "peer-+1",
+      "input": "beygram://push/open?v=2&account=123&kind=user&rawPeer=+1&msg=789",
+      "expectedLink": "beygram://push/open",
+      "navigation": null
+    },
+    {
+      "name": "peer-1%20",
+      "input": "beygram://push/open?v=2&account=123&kind=user&rawPeer=1%20&msg=789",
+      "expectedLink": "beygram://push/open",
+      "navigation": null
+    },
+    {
+      "name": "peer-1.0",
+      "input": "beygram://push/open?v=2&account=123&kind=user&rawPeer=1.0&msg=789",
+      "expectedLink": "beygram://push/open",
+      "navigation": null
+    },
+    {
+      "name": "msg-overflow",
+      "input": "beygram://push/open?v=2&account=123&kind=user&rawPeer=456&msg=2147483648",
+      "expectedLink": "beygram://push/open",
+      "navigation": null
+    },
+    {
+      "name": "msg-zero",
+      "input": "beygram://push/open?v=2&account=123&kind=user&rawPeer=456&msg=0",
+      "expectedLink": "beygram://push/open",
+      "navigation": null
+    },
+    {
+      "name": "msg-empty",
+      "input": "beygram://push/open?v=2&account=123&kind=user&rawPeer=456&msg=",
+      "expectedLink": "beygram://push/open",
+      "navigation": null
+    },
+    {
+      "name": "account-overflow",
+      "input": "beygram://push/open?v=2&account=9223372036854775808&kind=user&rawPeer=456&msg=789",
+      "expectedLink": "beygram://push/open",
+      "navigation": null
+    },
+    {
+      "name": "account-missing",
+      "input": "beygram://push/open?v=2&kind=user&rawPeer=456&msg=789",
+      "expectedLink": "beygram://push/open",
+      "navigation": null
+    },
+    {
+      "name": "kind-missing",
+      "input": "beygram://push/open?v=2&account=123&rawPeer=456&msg=789",
+      "expectedLink": "beygram://push/open",
+      "navigation": null
+    },
+    {
+      "name": "peer-missing",
+      "input": "beygram://push/open?v=2&account=123&kind=user&msg=789",
+      "expectedLink": "beygram://push/open",
+      "navigation": null
+    },
+    {
+      "name": "duplicate",
+      "input": "beygram://push/open?v=2&account=123&kind=user&rawPeer=456&msg=789&account=123",
+      "expectedLink": "beygram://push/open",
+      "navigation": null
+    },
+    {
+      "name": "legacy-mixed",
+      "input": "beygram://push/open?v=2&account=123&kind=user&rawPeer=456&msg=789&peer=456",
+      "expectedLink": "beygram://push/open",
+      "navigation": null
+    },
+    {
+      "name": "unknown-param",
+      "input": "beygram://push/open?v=2&account=123&kind=user&rawPeer=456&msg=789&extra=1",
+      "expectedLink": "beygram://push/open",
+      "navigation": null
+    },
+    {
+      "name": "fragment",
+      "input": "beygram://push/open?v=2&account=123&kind=user&rawPeer=456&msg=789#x",
+      "expectedLink": "beygram://push/open",
+      "navigation": null
+    },
+    {
+      "name": "credentials",
+      "input": "beygram://x@push/open?v=2&account=123&kind=user&rawPeer=456&msg=789",
+      "expectedLink": "beygram://push/open",
+      "navigation": null
+    },
+    {
+      "name": "port",
+      "input": "beygram://push:42/open?v=2&account=123&kind=user&rawPeer=456&msg=789",
+      "expectedLink": "beygram://push/open",
+      "navigation": null
+    },
+    {
+      "name": "external",
+      "input": "https://example.invalid/open?v=2&account=123&kind=user&rawPeer=456&msg=789",
+      "expectedLink": "beygram://push/open",
+      "navigation": null
+    },
+    {
+      "name": "encoded-key",
+      "input": "beygram://push/open?v=2&account=123&kind=user&raw%50eer=456&msg=789",
+      "expectedLink": "beygram://push/open",
+      "navigation": null
+    },
+    {
+      "name": "encoded-value",
+      "input": "beygram://push/open?v=2&account=123&kind=user&rawPeer=%3456&msg=789",
+      "expectedLink": "beygram://push/open",
+      "navigation": null
+    },
+    {
+      "name": "malformed-query",
+      "input": "beygram://push/open?v=2&account=123&kind=user&rawPeer=456&msg=789&",
+      "expectedLink": "beygram://push/open",
+      "navigation": null
+    },
+    {
+      "name": "newline",
+      "input": "beygram://push/open?v=2&account=123&kind=user&rawPeer=456&msg=789\n",
+      "expectedLink": "beygram://push/open",
+      "navigation": null
+    },
+    {
+      "name": "duplicate-legacy",
+      "input": "beygram://push/open?peer=1&peer=2",
+      "expectedLink": "beygram://push/open",
+      "navigation": null
+    },
+    {
+      "name": "unknown-version-legacy",
+      "input": "beygram://push/open?v=3&peer=456",
+      "expectedLink": "beygram://push/open",
+      "navigation": null
+    },
+    {
+      "name": "path",
+      "input": "beygram://push/open/extra?v=2&account=123&kind=user&rawPeer=456&msg=789",
+      "expectedLink": "beygram://push/open",
+      "navigation": null
+    },
+    {
+      "name": "oversize",
+      "input": "beygram://push/open?v=2&account=123&kind=user&rawPeer=456&msg=789&extra=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expectedLink": "beygram://push/open",
+      "navigation": null
+    }
+  ]
+}
