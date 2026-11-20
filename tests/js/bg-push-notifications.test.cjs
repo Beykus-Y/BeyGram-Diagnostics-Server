@@ -88,3 +88,11 @@ test('read and deletion close only same-account same-peer individual messages', 
   assert.equal(core.shouldCloseNotification(parse(make('READ_HISTORY',[],{chat_id:5,max_id:7},'')),'tg:123:chat:5:7'),false);
   assert.equal(core.shouldCloseNotification(parse(make('READ_REACTION',[],{chat_id:5,messages:'7'})),'tg:123:chat:5:7'),false);
 });
+
+test('group story exposes only its documented group name', () => {
+  const result = parse(make('CHAT_MESSAGE_STORY', ['Group', 'unexpected'], {chat_id:5,msg_id:7}));
+  assert.equal(result.t, 'Group');
+  assert.equal(result.b, 'История');
+  assert.equal(parse(make('CHAT_MESSAGE_STORY', [] )).k, 'unknown');
+  assert.equal(parse(make('CHANNEL_MESSAGE_STORY', ['Channel']), 'en').b, 'Story');
+});
