@@ -106,3 +106,6 @@ test('конверт aesgcm не открывается с чужим auth-се�
   wrong[0] ^= 0xff;
   await assert.rejects(BgCore.decryptIngress(envelope(), await receiverKey(), publicRaw(), wrong));
 });
+
+// Include parser regressions in the existing CI Node entry point.
+await import('./bg-push-notifications.test.cjs');
