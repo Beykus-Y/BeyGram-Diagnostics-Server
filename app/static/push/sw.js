@@ -1,5 +1,5 @@
 /*
- * BG Push: service worker, версия 3 (конверт aesgcm, см. bg-core.js). Обрабатывает только push и notificationclick.
+ * BG Push: service worker, версия 4 (конверт aesgcm, см. bg-core.js). Обрабатывает только push и notificationclick.
  * Кэширования и перехвата запросов нет: привязка и токены не должны попадать в кэш.
  */
 importScripts('/push/assets/js/bg-core.js', '/push/assets/js/bg-store.js');
@@ -80,9 +80,19 @@ async function handlePush(event) {
   // Web Push requires a visible notification. Control events use a neutral
   // refresh hint instead of pretending a new Telegram message arrived.
   message = BgCore.applyPrivacy(message || BgCore.fallback(language), preferences.privacy, language);
+  if (message.k === 'control') {
+    try {
+      var notifications = await self.registration.getNotifications();
+      notifications.forEach(function (notification) {
+        if (BgCore.shouldCloseNotification(message, notification.tag)) notification.close();
+      });
+    } catch (error) {
+      // Best effort: browser may not expose all notifications.
+    }
+  }
   await self.registration.showNotification(message.t, {
     body: message.b,
-    tag: message.tag || undefined,
+    tag: message.k === 'control' ? 'bg-push-control' : message.tag || undefined,
     silent: message.silent === true || message.k === 'control',
     data: { link: message.link },
     icon: '/push/assets/icons/icon-192.png'
