@@ -109,3 +109,5 @@ test('конверт aesgcm не открывается с чужим auth-се�
 
 // Include parser regressions in the existing CI Node entry point.
 await import('./bg-push-notifications.test.cjs');
+
+await import('./bg-push-navigation.test.cjs');
