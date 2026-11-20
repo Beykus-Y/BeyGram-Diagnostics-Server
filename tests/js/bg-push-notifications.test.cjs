@@ -60,3 +60,31 @@ test('legacy BG Push payload remains compatible', () => {
   assert.equal(message.id, 'test-1');
   assert.equal(parse({v:1,k:'msg',t:'A',b:'B',peer:42}).link, 'beygram://push/open?peer=42');
 });
+
+test('album counts use proper plural forms and never replace individual messages', () => {
+  for (const [n, expected] of [[1,'1 фотография'],[2,'2 фотографии'],[5,'5 фотографий'],[11,'11 фотографий'],[21,'21 фотография']]) {
+    const result = parse(make('MESSAGE_PHOTOS', ['Alice', String(n)]));
+    assert.equal(result.b, expected);
+    assert.equal(result.tag, '');
+  }
+  assert.equal(parse(make('CHAT_MESSAGE_DOCS', ['A','Group','3']), 'en').b, 'A: 3 files');
+  assert.equal(parse(make('CHANNEL_MESSAGES', ['Channel'])).b, 'Альбом');
+});
+test('known previews and privacy only reveal fields allowed by schema', () => {
+  assert.equal(parse(make('MESSAGE_STICKER',['Alice','❤️'])).b,'Стикер: ❤️');
+  assert.equal(parse(make('CHAT_MESSAGE_POLL',['Alice','Group','Question'])).b,'Alice: Опрос: Question');
+  assert.equal(parse(make('MESSAGE_NOTEXT',['Alice','private'])).b,'Новое сообщение');
+  assert.equal(parse(make('ENCRYPTED_MESSAGE',['private'])).t,'BeyGram');
+  assert.equal(core.applyPrivacy(parse(make('MESSAGE_TEXT',['A','private'])),'corrupt','en').t,'BeyGram');
+});
+test('read and deletion close only same-account same-peer individual messages', () => {
+  const deletion = parse(make('MESSAGE_DELETED', [], {chat_id:5,messages:'7,9'}));
+  const read = parse(make('READ_HISTORY', [], {chat_id:5,max_id:'9007199254740993'}));
+  for (const [tag, expected] of [['tg:123:chat:5:7',true],['tg:124:chat:5:7',false],['tg:123:channel:5:7',false],['tg:123:chat:5:8',false],['tg:123:chat:5:7:extra',false]]) {
+    assert.equal(core.shouldCloseNotification(deletion,tag),expected);
+  }
+  assert.equal(core.shouldCloseNotification(read,'tg:123:chat:5:9007199254740993'),true);
+  assert.equal(core.shouldCloseNotification(read,'tg:123:chat:5:9007199254740994'),false);
+  assert.equal(core.shouldCloseNotification(parse(make('READ_HISTORY',[],{chat_id:5,max_id:7},'')),'tg:123:chat:5:7'),false);
+  assert.equal(core.shouldCloseNotification(parse(make('READ_REACTION',[],{chat_id:5,messages:'7'})),'tg:123:chat:5:7'),false);
+});
