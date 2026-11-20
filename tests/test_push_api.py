@@ -7,11 +7,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import secrets
 import time
 
+import http_ece
 import httpx
 import pytest
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -266,13 +268,144 @@ def test_ingress_accepts_only_known_capability_and_bounded_aes128gcm(push_settin
             "/api/v1/push/ingress/" + "A" * 43, content=b"x" * 40, headers={"Content-Encoding": "aes128gcm"}
         )
         assert unknown.status_code == 404
-        assert client.post(path, content=b"x" * 40, headers={"Content-Encoding": "aesgcm"}).status_code == 415
+        assert client.post(path, content=b"x" * 40, headers={"Content-Encoding": "br"}).status_code == 415
         assert client.post(path, content=b"", headers={"Content-Encoding": "aes128gcm"}).status_code == 422
         too_big = client.post(path, content=b"x" * 3901, headers={"Content-Encoding": "aes128gcm"})
         assert too_big.status_code == 413
 
         assert client.delete(f"/api/v1/push/registrations/{pair['rid']}", headers=_auth(pair["owner"])).status_code == 200
         assert _ingress(client, pair, b"after revoke").status_code == 404
+
+
+class _LogCapture(logging.Handler):
+    """Собирает строки журнала роутера. Настройка логов приложения сбрасывает корневые обработчики, поэтому
+    caplog здесь не годится: вешаем обработчик на сам логгер."""
+
+    def __init__(self) -> None:
+        super().__init__(logging.INFO)
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.messages.append(record.getMessage())
+
+
+def _counters(client: TestClient) -> dict[str, int]:
+    """Счётчики приёма ingress (остальные метрики, например регистрации, здесь не нужны)."""
+    rows = client.app.state.context.push_db.connection.execute(
+        "SELECT metric, SUM(value) AS total FROM push_counters GROUP BY metric"
+    ).fetchall()
+    return {row["metric"]: row["total"] for row in rows if row["metric"].startswith("ingress_")}
+
+
+def _aesgcm_ingress(client: TestClient, pair: dict, plaintext: bytes) -> httpx.Response:
+    """Telegram шлёт aesgcm: соль и ключ отправителя лежат в заголовках Encryption и Crypto-Key, а не в теле."""
+    browser = pair["browser"]
+    sender = ec.generate_private_key(ec.SECP256R1())
+    salt = os.urandom(16)
+    record = http_ece.encrypt(
+        plaintext,
+        salt=salt,
+        private_key=sender,
+        dh=browser.ingress_pub,
+        auth_secret=browser.ingress_auth,
+        version="aesgcm",
+    )
+    return client.post(
+        f"/api/v1/push/ingress/{pair['capability']}",
+        content=record,
+        headers={
+            "Content-Encoding": "aesgcm",
+            "Encryption": f"salt={b64url_encode(salt)}",
+            "Crypto-Key": f"dh={b64url_encode(crypto.public_key_bytes(sender.public_key()))}",
+            "TTL": "600",
+        },
+    )
+
+
+def test_ingress_accepts_telegram_aesgcm_and_queues_envelope_for_pwa(push_settings):
+    with TestClient(create_app(push_settings)) as client:
+        pair = _pair(client)
+        plaintext = b'{"type":"message","peer":7}'
+        assert _aesgcm_ingress(client, pair, plaintext).status_code == 201
+
+        captured: list[httpx.Request] = []
+        assert _run_worker(client, lambda r: captured.append(r) or httpx.Response(201)) == 1
+        browser = pair["browser"]
+        envelope = browser.open_outer(captured[0].content)
+        # PWA открывает запись тем же способом, что и эталонная http_ece, по salt и dh из конверта.
+        assert envelope[:4] == b"BGA1"
+        opened = http_ece.decrypt(
+            envelope[89:],
+            salt=envelope[4:20],
+            private_key=browser.ingress_key,
+            dh=envelope[20:85],
+            auth_secret=browser.ingress_auth,
+            rs=int.from_bytes(envelope[85:89], "big"),
+            version="aesgcm",
+        )
+        assert opened == plaintext
+        assert _counters(client)["ingress_accepted"] == 1
+
+
+def test_aesgcm_without_telegram_headers_is_422_and_counted(push_settings):
+    with TestClient(create_app(push_settings)) as client:
+        pair = _pair(client)
+        path = f"/api/v1/push/ingress/{pair['capability']}"
+        response = client.post(path, content=b"x" * 40, headers={"Content-Encoding": "aesgcm"})
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "payload_invalid"
+        assert _counters(client) == {"ingress_attempt": 1, "ingress_rejected_payload_invalid": 1}
+
+
+def test_ingress_counters_record_attempts_and_rejection_reasons(push_settings):
+    with TestClient(create_app(push_settings)) as client:
+        pair = _pair(client)
+        path = f"/api/v1/push/ingress/{pair['capability']}"
+        assert _ingress(client, pair, b'{"type":"message"}').status_code == 201
+        unsupported = client.post(path, content=b"x" * 40, headers={"Content-Encoding": "br"})
+        assert unsupported.status_code == 415
+        unknown = client.post(
+            "/api/v1/push/ingress/" + "A" * 43, content=b"x" * 40, headers={"Content-Encoding": "aes128gcm"}
+        )
+        assert unknown.status_code == 404
+        too_big = client.post(path, content=b"x" * 3901, headers={"Content-Encoding": "aes128gcm"})
+        assert too_big.status_code == 413
+        assert _counters(client) == {
+            "ingress_attempt": 4,
+            "ingress_accepted": 1,
+            "ingress_rejected_unsupported_encoding": 1,
+            "ingress_rejected_not_found": 1,
+            "ingress_rejected_body_too_large": 1,
+        }
+
+
+def test_ingress_logs_encoding_and_parameter_names_but_never_the_capability(push_settings):
+    capture = _LogCapture()
+    logger = logging.getLogger("app.routers.push")
+    previous_level = logger.level
+    logger.setLevel(logging.INFO)
+    logger.addHandler(capture)
+    try:
+        with TestClient(create_app(push_settings)) as client:
+            pair = _pair(client)
+            client.post(
+                f"/api/v1/push/ingress/{pair['capability']}",
+                content=b"x" * 40,
+                headers={
+                    "Content-Encoding": "aesgcm",
+                    "Content-Type": "application/octet-stream; charset=x",
+                    "Encryption": "salt=c2FsdA",
+                    "Crypto-Key": "dh=ZGg",
+                },
+            )
+    finally:
+        logger.removeHandler(capture)
+        logger.setLevel(previous_level)
+    assert capture.messages == [
+        "push ingress: encoding=aesgcm content_type=application/octet-stream "
+        "encryption_params=salt crypto_key_params=dh"
+    ]
+    assert all(pair["capability"] not in message for message in capture.messages)
 
 
 def test_queue_limits_and_kill_switches(push_settings):

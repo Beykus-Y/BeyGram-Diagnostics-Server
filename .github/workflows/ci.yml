@@ -39,6 +39,16 @@ jobs:
           BOOTSTRAP_ALLOWLIST: ""
         run: python -m pytest tests -q --basetemp=.pytest-tmp-ci
 
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Node - расшифровка BG Push в PWA (bg-core.js)
+        env:
+          BG_PYTHON: python
+        run: node --test tests/js/bg-core.test.mjs
+
   docker:
     name: Docker build + compose config
     runs-on: ubuntu-latest

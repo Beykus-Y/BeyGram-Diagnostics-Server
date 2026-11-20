@@ -319,7 +319,11 @@ def accept_ingress(
     ttl: int | None,
     at: float,
 ) -> None:
-    """Принимает непрозрачный Telegram-payload и ставит его в очередь. Ответ отдаётся после commit."""
+    """Принимает непрозрачный Telegram-payload и ставит его в очередь. Ответ отдаётся после commit.
+
+    Попытка считается здесь же: при отказе транзакция откатывается, и счётчик отказа пишет роутер.
+    """
+    bump(conn, "ingress_attempt", at=at)
     if not switch_enabled(conn, SWITCH_INGRESS):
         raise ApiError("ingress_disabled", "Приём BG Push временно приостановлен.", 503, retry_after=300)
     row = conn.execute(

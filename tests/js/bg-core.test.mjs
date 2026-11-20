@@ -27,6 +27,7 @@ const encoder = new TextEncoder();
 const body = () => new Uint8Array(Buffer.from(fixture.body, 'base64'));
 const publicRaw = () => new Uint8Array(Buffer.from(fixture.publicRaw, 'base64'));
 const auth = () => new Uint8Array(Buffer.from(fixture.auth, 'base64'));
+const envelope = () => new Uint8Array(Buffer.from(fixture.aesgcmEnvelope, 'base64'));
 
 async function receiverKey() {
   return crypto.subtle.importKey(
@@ -82,4 +83,26 @@ test('неверный auth-секрет приводит к ошибке', asyn
   const wrong = auth();
   wrong[0] ^= 0xff;
   await assert.rejects(BgCore.decryptAes128gcm(body(), await receiverKey(), publicRaw(), wrong));
+});
+
+test('decryptIngress открывает конверт aesgcm, записанный эталонной http_ece', async () => {
+  const plain = await BgCore.decryptIngress(envelope(), await receiverKey(), publicRaw(), auth());
+  assert.equal(new TextDecoder().decode(plain), fixture.plaintext);
+});
+
+test('decryptIngress по-прежнему открывает обычную запись aes128gcm', async () => {
+  const plain = await BgCore.decryptIngress(body(), await receiverKey(), publicRaw(), auth());
+  assert.equal(new TextDecoder().decode(plain), fixture.plaintext);
+});
+
+test('подмена байта в конверте aesgcm приводит к ошибке', async () => {
+  const tampered = envelope();
+  tampered[tampered.length - 1] ^= 0x01;
+  await assert.rejects(BgCore.decryptIngress(tampered, await receiverKey(), publicRaw(), auth()));
+});
+
+test('конверт aesgcm не открывается с чужим auth-секретом', async () => {
+  const wrong = auth();
+  wrong[0] ^= 0xff;
+  await assert.rejects(BgCore.decryptIngress(envelope(), await receiverKey(), publicRaw(), wrong));
 });

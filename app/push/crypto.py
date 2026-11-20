@@ -1,6 +1,7 @@
 """Криптография BG Push.
 
 * RFC 8188 (aes128gcm) и RFC 8291 (Web Push message encryption), одна запись;
+* aesgcm (draft-ietf-webpush-encryption-04): конверт `BGA1` для PWA, см. `aesgcm_envelope`;
 * RFC 8292 (VAPID): ES256-JWT в заголовке `Authorization: vapid t=..., k=...`.
 
 Сервер шифрует внешний слой под ключ PWA-подписки и тестовые сообщения под
@@ -13,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import struct
 from dataclasses import dataclass
 
@@ -122,6 +124,56 @@ def decrypt_aes128gcm(body: bytes, *, private_key: ec.EllipticCurvePrivateKey, a
     if end < 0 or padded[end] != 0x02:
         raise PushCryptoError("invalid record padding")
     return padded[:end]
+
+
+# --- aesgcm (draft-ietf-webpush-encryption-04): конверт для PWA --------------
+#
+# Telegram присылает тело в старом формате aesgcm: соль и ключ отправителя лежат в заголовках Encryption и
+# Crypto-Key, а не в теле. Сервер не может расшифровать запись (приватного ключа ingress у него нет), поэтому
+# переносит тело вместе с этими значениями в конверте. PWA открывает его на устройстве (bg-core.js, decryptIngress).
+
+AESGCM_ENVELOPE_MAGIC = b"BGA1"
+AESGCM_DEFAULT_RECORD_SIZE = 4096
+AESGCM_TAG_LEN = 16
+
+
+def _header_params(value: str) -> dict[str, str]:
+    """Параметры заголовка вида `salt=...;rs=4096` или `dh=...;p256ecdsa=...`; имена в нижнем регистре."""
+    params: dict[str, str] = {}
+    for part in re.split(r"[;,]", value):
+        name, sep, val = part.partition("=")
+        if sep:
+            params.setdefault(name.strip().lower(), val.strip().strip('"'))
+    return params
+
+
+def _b64_loose(value: str) -> bytes:
+    """base64url без padding. Стандартный base64 с padding тоже принимаем: отправители расходятся."""
+    return b64url_decode(value.rstrip("=").replace("+", "-").replace("/", "_"))
+
+
+def aesgcm_envelope(body: bytes, *, encryption: str, crypto_key: str) -> bytes:
+    """Собирает конверт из тела одной записи aesgcm и значений заголовков Encryption и Crypto-Key.
+
+    Конверт: "BGA1" (4) || salt (16) || dh отправителя (65) || rs (4, big-endian) || тело.
+    Принимается одна запись: тело не длиннее rs + 16 байт тега. Telegram шлёт короткие уведомления,
+    поэтому многозаписное тело отклоняется целиком, а не разбирается частично.
+    """
+    params = _header_params(encryption)
+    keys = _header_params(crypto_key)
+    try:
+        salt = _b64_loose(params.get("salt", ""))
+        sender_public = _b64_loose(keys.get("dh", ""))
+        record_size = int(params.get("rs", str(AESGCM_DEFAULT_RECORD_SIZE)))
+    except ValueError as exc:
+        raise PushCryptoError("invalid aesgcm headers") from exc
+    if len(salt) != 16 or len(sender_public) != PUBLIC_KEY_LEN or sender_public[0] != 0x04:
+        raise PushCryptoError("invalid aesgcm headers")
+    if not 18 <= record_size <= 0xFFFFFFFF:
+        raise PushCryptoError("invalid aesgcm record size")
+    if len(body) > record_size + AESGCM_TAG_LEN:
+        raise PushCryptoError("aesgcm body does not fit into one record")
+    return AESGCM_ENVELOPE_MAGIC + salt + sender_public + struct.pack(">I", record_size) + body
 
 
 # --- VAPID (RFC 8292) -------------------------------------------------------

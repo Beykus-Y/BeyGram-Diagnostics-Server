@@ -31,9 +31,10 @@ Telegram (account.registerDevice, token_type=10, endpoint = ingress_url)
 
 - **Реальный iPhone.** Установка PWA, выдача разрешения по жесту, доставка при закрытых приложениях,
   при блокировке и после перезагрузки, переход в BeyGram. Симулятор не доказывает фоновую доставку.
-- **Формат Telegram.** Неизвестно, как Telegram шифрует payload на ингресс и какие у него поля.
-  PWA разбирает только собственный тестовый формат v1. До прототипа реальные уведомления
-  показываются как общее «Новое уведомление» без перехода в чат.
+- **Формат Telegram.** Telegram присылает `Content-Encoding: aesgcm`. Это гипотеза по ответам 415 до выкладки,
+  когда заголовок не логировался. Подтверждается строкой `push ingress: encoding=aesgcm` в журнале приложения
+  после выкладки. Поля payload не разобраны: PWA разбирает только собственный тестовый формат v1. До прототипа
+  реальные уведомления показываются как общее «Новое уведомление» без перехода в чат.
 - **Параметры registerDevice.** Значения `secret` и `app_sandbox` для token_type 10 не проверены.
   Сервер эти поля не использует.
 - **Решение go/no-go.** Принимает владелец проекта по результатам прототипа на реальном аккаунте.
@@ -81,14 +82,23 @@ Capability находится в пути URL и является секрето
 прокси пишет полный путь, поэтому для ингресса журнал прокси нужно отключить:
 
 ```nginx
-location ~ ^/api/v1/push/ingress/ {
-    access_log off;                 # в пути capability; журнал прокси не должен его писать
-    client_max_body_size 4k;        # PUSH_MAX_INGRESS_BYTES = 3900
-    proxy_pass http://app;          # ваш upstream
+# В http {}: журнал без URI, потому что в пути capability (секрет)
+log_format bgpush '$time_iso8601 $remote_addr $status enc="$http_content_encoding" len=$content_length';
+
+location ^~ /api/v1/push/ingress/ {
+    access_log /var/log/nginx/bgpush.log bgpush;  # без URI; если журнал не нужен, access_log off;
+    client_max_body_size 4k;                      # PUSH_MAX_INGRESS_BYTES = 3900
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_pass http://app;                        # ваш upstream
 }
 ```
 
-Блок должен стоять до общего `location /api/`, потому что regex-локации проверяются раньше префиксных.
+`^~` отключает проверку регулярных выражений для этого пути, поэтому порядок блоков не важен. Заголовки прокси
+перечислены все: блок с собственными `proxy_set_header` не наследует их с уровня `server`. В журнале `enc=` и
+`len=` показывают, какой `Content-Encoding` и размер прислал Telegram. Строки `log_format` и `access_log`
+вставляются в конфиг nginx, а не в терминал.
 IP клиента сервер определяет так же, как для остального API (см. настройки доверенного прокси).
 
 Остальные push-пути не содержат секретов в URL: код привязки передаётся во фрагменте (`#`), который браузер
@@ -138,7 +148,7 @@ bearer-токены, адреса push-сервисов, ключи p256dh и au
 | `POST /registrations/{id}/test` | тестовое уведомление (владелец или устройство) | 202: `test_id`; 409, если привязка не активна |
 | `POST /registrations/{id}/ack` | подтверждение получения (PWA) | `acknowledged` |
 | `DELETE /registrations/{id}` | отзыв (владелец или устройство; повтор безопасен) | `deleted` |
-| `POST /ingress/{capability}` | приём Telegram Web Push (без Bearer) | 201 |
+| `POST /ingress/{capability}` | приём Telegram Web Push (без Bearer) | 201; 404 — неизвестный capability; 413; 415 — `Content-Encoding` не поддерживается; 422 — пустое тело или заголовки aesgcm; 429; 503 |
 
 Регистрация в Telegram: `account.registerDevice(token_type=10, token=JSON)`, где JSON содержит
 `endpoint` = `ingress_url` и `keys` = `telegram_keys`. Ключи подписки браузера в этот JSON не входят.
@@ -150,6 +160,35 @@ bearer-токены, адреса push-сервисов, ключи p256dh и au
 Переход из уведомления: `beygram://push/open?account=<id>&peer=<id>&msg=<id>`. Все параметры необязательны.
 Без них нативный клиент открывает список чатов. PWA строит ссылку только из числовых полей и не исполняет
 URL из payload. Проверку `account`, `peer` и `msg` выполняет нативный клиент.
+
+## Приём Telegram и форматы
+
+Telegram присылает POST на `ingress_url`. Принимаются два значения `Content-Encoding`:
+
+- `aes128gcm` (RFC 8291): тело хранится как есть, заголовок записи находится внутри тела.
+- `aesgcm` (draft-ietf-webpush-encryption-04): соль и `dh` отправителя передаются в заголовках `Encryption: salt=…`
+  и `Crypto-Key: dh=…`, а не в теле. Сервер не может расшифровать запись (приватного ключа ingress у него нет),
+  поэтому переносит тело вместе с этими значениями в конверт:
+
+| Смещение | Длина | Содержимое |
+|---|---|---|
+| 0 | 4 | `BGA1` |
+| 4 | 16 | salt |
+| 20 | 65 | dh отправителя (несжатая точка P-256) |
+| 85 | 4 | rs, big-endian |
+| 89 | до 3900 | шифротекст одной записи вместе с тегом |
+
+Для `aesgcm` принимается одна запись: тело не длиннее `rs + 16`. Конверт — внутренний слой. Сервер шифрует его
+внешним слоем RFC 8291 под ключ подписки PWA: 3989 байт открытого текста при максимальном теле, 4092 байта целиком
+при лимите push-сервиса 4096 байт. PWA открывает конверт функцией `decryptIngress` в `bg-core.js`.
+
+Другие значения `Content-Encoding` получают 415, тело с некорректными заголовками aesgcm — 422.
+
+Каждая попытка и каждый отказ учитываются в суточных счётчиках без идентификаторов: `ingress_attempt` (все попытки),
+`ingress_accepted` и `ingress_rejected_<причина>` (`unsupported_encoding`, `payload_invalid`, `not_found`,
+`body_too_large`, `rate_limited`, `ingress_disabled`, `queue_full`). Они выводятся в админке, в блоке «Метрики за 7 дней».
+Журнал приложения пишет строку `push ingress: encoding=… content_type=… encryption_params=… crypto_key_params=…`
+на каждый приём. В ней только имена параметров заголовков: без capability, соли и ключа.
 
 ## Открытые решения
 
@@ -174,14 +213,19 @@ python -m pytest tests -q
 BG_PYTHON=/путь/к/python node --test tests/js/bg-core.test.mjs
 ```
 
-Второй набор проверяет расшифровку PWA на записи, созданной серверной функцией шифрования. Нужны Node 22 и
-python с пакетом `cryptography` (например, из venv сервера).
+Второй набор проверяет расшифровку PWA на записи, созданной серверной функцией шифрования (aes128gcm), и на конверте
+aesgcm из записи эталонной библиотеки `http_ece`. Нужны Node 22 и python с пакетами из `requirements-dev.txt`
+(например, из venv сервера). CI запускает оба набора.
 
 ## Диагностика
 
 - `503 push_disabled` — модуль выключен (`ENABLE_PUSH=false`) или не инициализирован.
 - `409 registration_inactive` — тест для привязки, которая не активна.
 - `429 rate_limited` — превышен лимит. Окна описаны в переменных `RL_PUSH_*` в `.env.example`.
+- `415 unsupported_encoding` на ingress — `Content-Encoding` не `aes128gcm` и не `aesgcm`. Смотрите счётчик
+  `ingress_rejected_unsupported_encoding` и строку `push ingress: encoding=…` в журнале приложения.
+- `422 payload_invalid` на ingress — пустое тело либо заголовки aesgcm не разобраны (нет salt или dh, или тело
+  длиннее одной записи).
 - Провайдер ответил 404 или 410 — регистрация отзывается автоматически. Нужна новая привязка в PWA.
 
 ## Что дальше (вне этого изменения)
