@@ -192,26 +192,138 @@
     return typeof value === 'string' ? value.slice(0, limit) : '';
   }
 
-  // Формат BG Push v1 (внутренний слой). Непонятный payload не угадываем: вернём null,
-  // и service worker покажет общее уведомление.
-  function parseMessage(bytes) {
+  // Telegram documents both the data wrapper and per-event argument schemas.
+  // Never interpret arbitrary loc_args as preview text.
+  var MEDIA = {
+    AUDIO: ['🎤 Голосовое сообщение', '🎤 Voice message'],
+    DOC: ['📎 Файл', '📎 File'],
+    PHOTO: ['📷 Фото', '📷 Photo'],
+    VIDEO: ['🎥 Видео', '🎥 Video'],
+    ROUND: ['Видеосообщение', 'Video message'],
+    GIF: ['GIF', 'GIF'],
+    STICKER: ['Стикер', 'Sticker'],
+    POLL: ['Опрос', 'Poll'],
+    QUIZ: ['Викторина', 'Quiz'],
+    CONTACT: ['Контакт', 'Contact'],
+    GEO: ['Геопозиция', 'Location'],
+    GEOLIVE: ['Геопозиция в реальном времени', 'Live location'],
+    NOTEXT: ['Новое сообщение', 'New message'],
+    PLAYLIST: ['🎵 Музыка', '🎵 Music'],
+    DOCS: ['Файлы', 'Files'],
+    PHOTOS: ['Фотографии', 'Photos'],
+    VIDEOS: ['Видео', 'Videos'],
+    FWDS: ['Пересланные сообщения', 'Forwarded messages']
+  };
+  var CONTROL = ['DC_UPDATE', 'MESSAGE_DELETED', 'READ_REACTION', 'READ_HISTORY',
+    'READ_STORIES', 'STORY_DELETED', 'GEO_LIVE_PENDING', 'SESSION_REVOKE', 'MESSAGE_MUTED'];
+
+  function langIndex(language) {
+    return /^en(?:-|$)/i.test(language || '') ? 1 : 0;
+  }
+
+  function fallback(language, control) {
+    var l = langIndex(language);
+    return { k: control ? 'control' : 'unknown', t: 'BeyGram',
+      b: control ? ['Откройте приложение для обновления', 'Open the app to refresh'][l] :
+        ['Новое уведомление', 'New notification'][l], link: OPEN_LINK, tag: '' };
+  }
+
+  // Lexically protect large integer tokens before JSON.parse; quoted strings are untouched.
+  // The parser only treats canonical positive decimal IDs as identifiers.
+  function parseJsonLossless(text) {
+    return JSON.parse(text.replace(/"(?:[^"\\]|\\[\s\S])*"|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/g,
+      function (token) {
+        return /^-?\d+$/.test(token) && !Number.isSafeInteger(Number(token)) ?
+          '"' + token + '"' : token;
+      }));
+  }
+
+  function positiveId(value) {
+    if (typeof value === 'number' && Number.isSafeInteger(value)) value = String(value);
+    return typeof value === 'string' && /^[1-9]\d{0,18}$/.test(value) &&
+      (value.length < 19 || value <= '9223372036854775807') ? value : '';
+  }
+
+  function clean(value, length) {
+    if (typeof value !== 'string') return '';
+    return Array.from(value.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, ' ').trim())
+      .slice(0, length).join('');
+  }
+
+  function telegramContext(data) {
+    var c = data.custom && typeof data.custom === 'object' && !Array.isArray(data.custom) ? data.custom : {};
+    var account = positiveId(data.user_id);
+    var peers = [['channel', positiveId(c.channel_id)], ['chat', positiveId(c.chat_id)], ['user', positiveId(c.from_id)]]
+      .filter(function (p) { return p[1]; });
+    // A channel or chat has priority over the author, but ambiguous group namespaces are rejected.
+    var peer = peers.length && !(positiveId(c.channel_id) && positiveId(c.chat_id)) ? peers[0] : ['', ''];
+    return { account: account, peerType: peer[0], peerId: peer[1], messageId: positiveId(c.msg_id),
+      silent: c.silent === true || c.silent === 1 || c.silent === '1',
+      mention: c.mention === true || c.mention === 1 || c.mention === '1' };
+  }
+
+  function parseTelegram(data, language) {
+    var key = data.loc_key;
+    if (typeof key !== 'string' || !/^[A-Z_0-9]{1,80}$/.test(key)) return null;
+    if (CONTROL.indexOf(key) !== -1) return fallback(language, true);
+    var m = /^(?:(CHAT|CHANNEL)_)?MESSAGE_([A-Z_]+)$/.exec(key);
+    var missed = key === 'PHONE_CALL_MISSED' || key === 'CONF_CALL_MISSED';
+    if (!missed && (!m || (m[2] !== 'TEXT' && !Object.prototype.hasOwnProperty.call(MEDIA, m[2])))) return null;
+    var kind = missed ? 'MISSED_CALL' : m[2];
+    var group = !missed && m[1] === 'CHAT';
+    // CHAT_MESSAGE_NOTEXT has a different schema (group name only); keep it private.
+    if (group && kind === 'NOTEXT') return fallback(language, false);
+    var args = Array.isArray(data.loc_args) ? data.loc_args : [];
+    var sender = clean(args[0], 100);
+    var title = group ? clean(args[1], 100) : sender;
+    if (!title || (group && !sender)) return fallback(language, false);
+    var l = langIndex(language);
+    var body;
+    if (missed) body = ['Пропущенный звонок', 'Missed call'][l];
+    else if (kind === 'TEXT') body = clean(args[group ? 2 : 1], MAX_TEXT);
+    else body = MEDIA[kind][l];
+    if (!body) body = ['Новое сообщение', 'New message'][l];
+    var ctx = telegramContext(data);
+    // Current IPA accepts an internal PeerId, not raw Telegram identifiers.
+    // Keep raw IDs local and use the safe chat-list link until native support is agreed.
+    var tag = !missed && ctx.account && ctx.peerType && ctx.peerId && ctx.messageId ?
+      ['tg', ctx.account, ctx.peerType, ctx.peerId, ctx.messageId].join(':') : '';
+    return { k: missed ? 'call' : 'msg', t: title, b: clean(group ? sender + ': ' + body : body, MAX_TEXT),
+      link: OPEN_LINK, tag: tag, context: ctx, silent: ctx.silent, event: key };
+  }
+
+  function parseDetailed(bytes, language) {
     var data;
     try {
-      data = JSON.parse(textDecoder.decode(bytes));
+      data = parseJsonLossless(textDecoder.decode(bytes));
     } catch (error) {
-      return null;
+      return { code: 'invalid-json-or-utf8', message: null };
     }
-    if (!data || data.v !== 1 || (data.k !== 'test' && data.k !== 'msg')) {
-      return null;
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return { code: 'invalid-format', message: null };
+    if (data.v === 1 && (data.k === 'test' || data.k === 'msg')) {
+      return { code: 'bg-v1', message: {
+        k: data.k, id: clip(data.id, 64), t: clip(data.t, 100) || 'BeyGram',
+        b: clip(data.b, MAX_TEXT) || fallback(language).b, link: buildLink(data), tag: clip(data.tag, 64)
+      }};
     }
-    return {
-      k: data.k,
-      id: clip(data.id, 64),
-      t: clip(data.t, 100) || 'BeyGram',
-      b: clip(data.b, MAX_TEXT) || 'Новое уведомление',
-      link: buildLink(data),
-      tag: clip(data.tag, 64)
-    };
+    var inner = data.data && typeof data.data === 'object' && !Array.isArray(data.data) ? data.data : data;
+    var message = parseTelegram(inner, language);
+    return { code: !message ? (typeof inner.loc_key === 'string' ? 'unknown-event' : 'invalid-format') :
+      message.k === 'control' ? 'control-event' : message.k === 'unknown' ? 'missing-preview' : 'telegram', message: message };
+  }
+
+  function parseMessage(bytes, language) {
+    return parseDetailed(bytes, language).message;
+  }
+
+  function applyPrivacy(message, mode, language) {
+    if (message.k === 'test' || message.k === 'control') return message;
+    if (mode !== 'name' && mode !== 'none') return message;
+    return Object.assign({}, message, {
+      t: mode === 'none' ? 'BeyGram' : message.t,
+      b: fallback(language).b,
+      link: mode === 'none' ? OPEN_LINK : message.link
+    });
   }
 
   root.BgCore = {
@@ -223,6 +335,9 @@
     decryptIngress: decryptIngress,
     generateReceiverKeys: generateReceiverKeys,
     parseMessage: parseMessage,
+    parseDetailed: parseDetailed,
+    fallback: fallback,
+    applyPrivacy: applyPrivacy,
     safeLink: safeLink,
     DEEP_LINK_RE: DEEP_LINK_RE
   };
