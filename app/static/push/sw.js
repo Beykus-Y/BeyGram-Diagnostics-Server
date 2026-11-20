@@ -1,5 +1,5 @@
 /*
- * BG Push: service worker, версия 2 (конверт aesgcm, см. bg-core.js). Обрабатывает только push и notificationclick.
+ * BG Push: service worker, версия 4 (конверт aesgcm, см. bg-core.js). Обрабатывает только push и notificationclick.
  * Кэширования и перехвата запросов нет: привязка и токены не должны попадать в кэш.
  */
 importScripts('/push/assets/js/bg-core.js', '/push/assets/js/bg-store.js');
@@ -33,39 +33,69 @@ async function handlePush(event) {
   }
 
   var message = null;
+  var preferences = {};
+  var code = 'missing-registration';
+  try {
+    preferences = (await BgStore.get('notification-preferences')) || {};
+  } catch (error) {
+    // Fail closed when local privacy preferences cannot be read.
+    preferences = { privacy: 'none' };
+  }
+  var language = preferences.language === 'ru' || preferences.language === 'en' ?
+    preferences.language : self.navigator.language;
   try {
     if (event.data && state && state.ingressPrivate) {
+      code = 'inner-decrypt-failed';
       var cipher = await event.data.arrayBuffer();
       var plain = await BgCore.decryptIngress(
         cipher, state.ingressPrivate, state.ingressPublicRaw, state.ingressAuth
       );
-      message = BgCore.parseMessage(plain);
+      var parsed = BgCore.parseDetailed(plain, language);
+      code = parsed.code;
+      message = parsed.message;
+    } else if (!event.data) {
+      code = 'missing-push-data';
     }
   } catch (error) {
     message = null;
   }
+  // Only a fixed diagnostic code is kept locally; never store raw payload or IDs.
+  try {
+    await BgStore.set('last-push-result', code);
+  } catch (error) {
+    // Diagnostics must not block notification delivery.
+  }
 
   if (message && message.k === 'test') {
-    await self.registration.showNotification('BG Push работает', {
-      body: 'Тестовое уведомление получено.',
+    await self.registration.showNotification(/^en(?:-|$)/i.test(language) ? 'BG Push is working' : 'BG Push работает', {
+      body: /^en(?:-|$)/i.test(language) ? 'Test notification received.' : 'Тестовое уведомление получено.',
       tag: 'bg-push-test',
       data: { link: 'beygram://push/open' },
-      icon: '/push/assets/icons/icon-192.png'
+      icon: '/push/assets/icons/icon-192.png?v=2'
     });
     await acknowledge(state, message.id);
     return;
   }
 
-  // Браузер требует видимого уведомления на каждый push, поэтому без расшифровки показываем общее.
-  if (!message) {
-    message = { t: 'BeyGram', b: 'Новое уведомление', link: 'beygram://push/open', tag: '' };
+  // Web Push requires a visible notification. Control events use a neutral
+  // refresh hint instead of pretending a new Telegram message arrived.
+  message = BgCore.applyPrivacy(message || BgCore.fallback(language), preferences.privacy, language);
+  if (message.k === 'control') {
+    try {
+      var notifications = await self.registration.getNotifications();
+      notifications.forEach(function (notification) {
+        if (BgCore.shouldCloseNotification(message, notification.tag)) notification.close();
+      });
+    } catch (error) {
+      // Best effort: browser may not expose all notifications.
+    }
   }
   await self.registration.showNotification(message.t, {
     body: message.b,
-    tag: message.tag || undefined,
+    tag: message.k === 'control' ? 'bg-push-control' : message.tag || undefined,
+    silent: message.silent === true || message.k === 'control',
     data: { link: message.link },
-    icon: '/push/assets/icons/icon-192.png',
-    badge: '/push/assets/icons/icon-192.png'
+    icon: '/push/assets/icons/icon-192.png?v=2'
   });
 }
 

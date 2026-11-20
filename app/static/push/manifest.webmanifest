@@ -1,7 +1,7 @@
 {
   "id": "/push/",
-  "name": "BG Push для BeyGram",
-  "short_name": "BG Push",
+  "name": "BeyGram",
+  "short_name": "BeyGram",
   "description": "Уведомления BeyGram на iPhone через Web Push.",
   "start_url": "/push/",
   "scope": "/push/",
@@ -10,7 +10,23 @@
   "background_color": "#f4f5fb",
   "theme_color": "#6357d9",
   "icons": [
-    { "src": "/push/assets/icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
-    { "src": "/push/assets/icons/icon-512.png", "sizes": "512x512", "type": "image/png" }
+    {
+      "src": "/push/assets/icons/icon-192.png?v=2",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/push/assets/icons/icon-512.png?v=2",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/push/assets/icons/icon-maskable-512.png?v=2",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
   ]
 }
