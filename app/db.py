@@ -150,8 +150,16 @@ _MIGRATIONS: tuple[tuple[int, str], ...] = ((1, _DDL_V1), (2, _DDL_V2), (3, _DDL
 class Database:
     """Асинхронная обёртка над единственным соединением SQLite."""
 
-    def __init__(self, path: str) -> None:
+    def __init__(
+        self,
+        path: str,
+        *,
+        migrations: tuple[tuple[int, str], ...] = _MIGRATIONS,
+        schema_version: int = SCHEMA_VERSION,
+    ) -> None:
         self._path = path
+        self._migrations = migrations
+        self._schema_version = schema_version
         self._conn: sqlite3.Connection | None = None
         self._lock = asyncio.Lock()
 
@@ -192,7 +200,7 @@ class Database:
         conn.execute("PRAGMA wal_autocheckpoint=512")
 
         self._migrate()
-        log.info("database ready", extra={"path": self._path, "schema_version": SCHEMA_VERSION})
+        log.info("database ready", extra={"path": self._path, "schema_version": self._schema_version})
 
     def close(self) -> None:
         if self._conn is not None:
@@ -207,12 +215,12 @@ class Database:
         row = conn.execute("SELECT version FROM schema_version").fetchone()
         current = int(row["version"]) if row else 0
 
-        if current > SCHEMA_VERSION:
+        if current > self._schema_version:
             raise RuntimeError(
-                f"Database schema version {current} is newer than supported {SCHEMA_VERSION}"
+                f"Database schema version {current} is newer than supported {self._schema_version}"
             )
 
-        for version, ddl in _MIGRATIONS:
+        for version, ddl in self._migrations:
             if version <= current:
                 continue
             log.info("applying migration", extra={"version": version})

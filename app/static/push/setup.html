@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#6357d9">
+  <meta name="color-scheme" content="light dark">
+  <meta name="referrer" content="no-referrer">
+  <title>Установка BG Push</title>
+  <link rel="manifest" href="/push/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/push/assets/icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="/push/assets/css/push.css">
+</head>
+<body>
+  <main class="wrap">
+    <header class="top">
+      <h1>Установка BG Push</h1>
+      <p class="lead">Код привязки для BeyGram</p>
+    </header>
+
+    <section class="card">
+      <ol class="steps">
+        <li>Скопируйте код ниже.</li>
+        <li>Нажмите «Поделиться» и выберите «На экран «Домой»».</li>
+        <li>Откройте BG Push с экрана «Домой», вставьте код и включите уведомления.</li>
+      </ol>
+    </section>
+
+    <section class="card">
+      <p class="label">Код привязки</p>
+      <p id="code" class="code">—</p>
+      <button id="copy" type="button" class="primary">Скопировать код</button>
+    </section>
+
+    <p id="note" class="message" role="status"></p>
+  </main>
+  <script src="/push/assets/js/setup.js"></script>
+</body>
+</html>

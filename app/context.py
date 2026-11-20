@@ -16,6 +16,8 @@ from dataclasses import dataclass, field
 
 from .config import Settings
 from .db import Database
+from .push.runtime import PushRuntime
+from .push.schema import PUSH_MIGRATIONS, PUSH_SCHEMA_VERSION
 from .telegram import DeliveryBotClient, ReportBotClient
 
 log = logging.getLogger(__name__)
@@ -58,6 +60,8 @@ class AppContext:
     delivery_bot: DeliveryBotClient
     health: dict[str, WorkerHealth] = field(default_factory=dict)
     tasks: list[asyncio.Task] = field(default_factory=list)
+    push: PushRuntime | None = None
+    push_db: Database | None = None
     _stopping: asyncio.Event = field(default_factory=asyncio.Event)
 
     # --- Создание -----------------------------------------------------------
@@ -66,11 +70,24 @@ class AppContext:
     def build(cls, settings: Settings) -> AppContext:
         db = Database(settings.database_path)
         db.connect()
+        push_runtime: PushRuntime | None = None
+        push_db: Database | None = None
+        if settings.enable_push:
+            # Ключи читаются сразу: ошибка конфигурации останавливает запуск, а не отправку.
+            push_runtime = PushRuntime.load(settings)
+            push_db = Database(
+                settings.push_database_path,
+                migrations=PUSH_MIGRATIONS,
+                schema_version=PUSH_SCHEMA_VERSION,
+            )
+            push_db.connect()
         return cls(
             settings=settings,
             db=db,
             report_bot=ReportBotClient(settings.report_bot_token, settings.telegram_api_base),
             delivery_bot=DeliveryBotClient(settings.delivery_bot_token, settings.telegram_api_base),
+            push=push_runtime,
+            push_db=push_db,
         )
 
     # --- Реестр здоровья воркеров -------------------------------------------
@@ -122,6 +139,11 @@ class AppContext:
                     "delivery worker disabled: token/chat are not configured",
                     extra={"has_token": self.delivery_bot.has_token},
                 )
+
+        if self.settings.enable_push and self.settings.enable_worker and self.push is not None and self.push_db is not None:
+            from .push import worker as push_worker
+
+            planned.append(("push-worker", lambda: push_worker.run(self)))
 
         if self.settings.enable_maintenance:
             planned.append(("maintenance", lambda: maintenance.run(self)))
@@ -182,3 +204,5 @@ class AppContext:
         await self.report_bot.aclose()
         await self.delivery_bot.aclose()
         await self.db.run(self.db.close)
+        if self.push_db is not None:
+            await self.push_db.run(self.push_db.close)
