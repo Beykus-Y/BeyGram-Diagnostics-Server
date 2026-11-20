@@ -180,12 +180,57 @@
     return params.length ? OPEN_LINK + '?' + params.join('&') : OPEN_LINK;
   }
 
-  // Принимаем только beygram://push/open с необязательными account, peer и msg. Иное заменяется на OPEN_LINK.
-  function safeLink(value) {
-    if (typeof value === 'string' && value.length <= 200 && DEEP_LINK_RE.test(value)) {
-      return value;
+  // Wire v2 never reuses the legacy packed "peer" field.
+  function messageId(value) {
+    var id = positiveId(value);
+    return id && (id.length < 10 || (id.length === 10 && id <= '2147483647')) ? id : '';
+  }
+
+  function buildNavigationLink(context) {
+    var account = positiveId(context.account);
+    var peer = positiveId(context.peerId);
+    var kind = context.peerType;
+    if (!account || !peer || ['user', 'chat', 'channel'].indexOf(kind) === -1) return OPEN_LINK;
+    var msg = '';
+    if (context.messageId !== undefined) {
+      msg = messageId(context.messageId);
+      if (!msg) return OPEN_LINK;
     }
-    return OPEN_LINK;
+    return OPEN_LINK + '?v=2&account=' + account + '&kind=' + kind + '&rawPeer=' + peer +
+      (msg ? '&msg=' + msg : '');
+  }
+
+  function parseNavigationLink(value) {
+    if (typeof value !== 'string' || value.length > 200 || /[^!-~]/.test(value)) return null;
+    if (value.indexOf(OPEN_LINK + '?') !== 0) return null;
+    var fields = Object.create(null);
+    var parts = value.slice(OPEN_LINK.length + 1).split('&');
+    for (var i = 0; i < parts.length; i++) {
+      var pair = /^([A-Za-z]+)=([A-Za-z0-9]+)$/.exec(parts[i]);
+      if (!pair || ['v', 'account', 'kind', 'rawPeer', 'msg'].indexOf(pair[1]) === -1 ||
+          Object.prototype.hasOwnProperty.call(fields, pair[1])) return null;
+      fields[pair[1]] = pair[2];
+    }
+    if (fields.v !== '2' || !positiveId(fields.account) || !positiveId(fields.rawPeer) ||
+        ['user', 'chat', 'channel'].indexOf(fields.kind) === -1) return null;
+    if (fields.msg !== undefined && !messageId(fields.msg)) return null;
+    var result = { account: fields.account, peerType: fields.kind, peerId: fields.rawPeer };
+    if (fields.msg !== undefined) result.messageId = fields.msg;
+    return result;
+  }
+
+  function safeLink(value) {
+    var navigation = parseNavigationLink(value);
+    if (navigation) return buildNavigationLink(navigation);
+    if (typeof value !== 'string' || value.length > 200 || /[^!-~]/.test(value) ||
+        !DEEP_LINK_RE.test(value)) return OPEN_LINK;
+    // Preserve legacy links, but reject duplicate keys rather than choosing one.
+    var query = value.split('?')[1];
+    if (query) {
+      var keys = query.split('&').map(function (part) { return part.split('=')[0]; });
+      if (new Set(keys).size !== keys.length) return OPEN_LINK;
+    }
+    return value;
   }
 
   function clip(value, limit) {
@@ -243,7 +288,7 @@
 
   function positiveId(value) {
     if (typeof value === 'number' && Number.isSafeInteger(value)) value = String(value);
-    return typeof value === 'string' && /^[1-9]\d{0,18}$/.test(value) &&
+    return typeof value === 'string' && /^[1-9]\d{0,18}$/.test(value) && !/[^0-9]/.test(value) &&
       (value.length < 19 || value <= '9223372036854775807') ? value : '';
   }
 
@@ -287,6 +332,33 @@
     return { account: account, peerType: peer[0], peerId: peer[1], messageId: positiveId(c.msg_id),
       silent: c.silent === true || c.silent === 1 || c.silent === '1',
       mention: c.mention === true || c.mention === 1 || c.mention === '1' };
+  }
+
+  // Addressing is distinct from the old display/dedup context: a group actor is
+  // not the dialog. Only documented cloud message/reaction events may navigate.
+  function telegramNavigation(data, match, reaction, kind) {
+    if ((!match && !reaction) || kind === 'STORY') return OPEN_LINK;
+    var custom = data.custom;
+    if (!custom || typeof custom !== 'object' || Array.isArray(custom) ||
+        Object.prototype.hasOwnProperty.call(custom, 'encryption_id')) return OPEN_LINK;
+    var prefix = reaction ? (reaction[1] ? 'CHAT' : '') : (match[1] || '');
+    var has = function (field) { return Object.prototype.hasOwnProperty.call(custom, field); };
+    // CHAT covers basic groups and supergroups; CHANNEL requires channel_id.
+    // Reject contradictory dialog fields, including malformed values; author fields
+    // chat_from_id/chat_from_group_id/chat_from_broadcast_id are not dialog IDs.
+    var targets = ['from_id', 'chat_id', 'channel_id'].filter(has);
+    if (targets.length !== 1) return OPEN_LINK;
+    var field = targets[0];
+    if ((prefix === 'CHAT' && field === 'from_id') ||
+        (prefix === 'CHANNEL' && field !== 'channel_id') ||
+        (!prefix && field !== 'from_id')) return OPEN_LINK;
+    var context = { account: data.user_id,
+      peerType: field === 'from_id' ? 'user' : field === 'chat_id' ? 'chat' : 'channel',
+      peerId: custom[field] };
+    // Aggregated notifications have no single guaranteed message target.
+    var aggregate = ['ALBUM', 'PHOTOS', 'VIDEOS', 'DOCS', 'PLAYLIST', 'FWDS'].indexOf(kind) !== -1;
+    if (!aggregate && has('msg_id')) context.messageId = custom.msg_id;
+    return buildNavigationLink(context);
   }
 
   function parseTelegram(data, language) {
@@ -335,13 +407,12 @@
     else body = mediaBody(kind, args[group ? 2 : 1], l);
     if (!body) body = ['Новое сообщение', 'New message'][l];
     var ctx = telegramContext(data);
-    // Current IPA accepts an internal PeerId, not raw Telegram identifiers.
-    // Keep raw IDs local and use the safe chat-list link until native support is agreed.
+    var navigation = missed ? OPEN_LINK : telegramNavigation(data, m, reaction, kind);
     var tag = !missed && !reaction && ['ALBUM', 'PHOTOS', 'VIDEOS', 'DOCS', 'PLAYLIST', 'FWDS'].indexOf(kind) === -1 && ctx.account && ctx.peerType && ctx.peerId && ctx.messageId ?
       ['tg', ctx.account, ctx.peerType, ctx.peerId, ctx.messageId].join(':') : '';
     // Reactions may have multiple actors; no tag-based collapse without a verified event ID.
     return { k: missed ? 'call' : reaction ? 'reaction' : 'msg', t: title, b: clean(group && !groupStory ? sender + ': ' + body : body, MAX_TEXT),
-      link: OPEN_LINK, tag: tag, context: ctx, silent: ctx.silent, event: key };
+      link: navigation, tag: tag, context: ctx, silent: ctx.silent, event: key };
   }
 
   function parseDetailed(bytes, language) {
@@ -355,7 +426,7 @@
     if (data.v === 1 && (data.k === 'test' || data.k === 'msg')) {
       return { code: 'bg-v1', message: {
         k: data.k, id: clip(data.id, 64), t: clip(data.t, 100) || 'BeyGram',
-        b: clip(data.b, MAX_TEXT) || fallback(language).b, link: buildLink(data), tag: clip(data.tag, 64)
+        b: clip(data.b, MAX_TEXT) || fallback(language).b, link: data.k === 'test' ? OPEN_LINK : buildLink(data), tag: clip(data.tag, 64)
       }};
     }
     var inner = data.data && typeof data.data === 'object' && !Array.isArray(data.data) ? data.data : data;
@@ -409,6 +480,8 @@
     applyPrivacy: applyPrivacy,
     shouldCloseNotification: shouldCloseNotification,
     safeLink: safeLink,
+    buildNavigationLink: buildNavigationLink,
+    parseNavigationLink: parseNavigationLink,
     DEEP_LINK_RE: DEEP_LINK_RE
   };
 })(typeof self !== 'undefined' ? self : globalThis);
