@@ -319,9 +319,12 @@
     var kind = missed ? 'MISSED_CALL' : reaction ? 'REACTION' : m[2];
     var group = !missed && (reaction ? !!reaction[1] : m[1] === 'CHAT');
     var args = Array.isArray(data.loc_args) ? data.loc_args : [];
-    var sender = clean(args[0], 100);
-    var title = group ? clean(args[1], 100) : sender;
-    if (!title || (group && !sender)) return fallback(language, false);
+    // CHAT_MESSAGE_STORY has only a group-name argument, unlike other CHAT_MESSAGE events.
+    // Never invent an author or treat additional arguments as a title.
+    var groupStory = key === 'CHAT_MESSAGE_STORY';
+    var sender = groupStory ? '' : clean(args[0], 100);
+    var title = groupStory ? clean(args[0], 100) : group ? clean(args[1], 100) : sender;
+    if (!title || (group && !groupStory && !sender)) return fallback(language, false);
     var l = langIndex(language);
     var body;
     if (missed) body = ['Пропущенный звонок', 'Missed call'][l];
@@ -337,7 +340,7 @@
     var tag = !missed && !reaction && ['ALBUM', 'PHOTOS', 'VIDEOS', 'DOCS', 'PLAYLIST', 'FWDS'].indexOf(kind) === -1 && ctx.account && ctx.peerType && ctx.peerId && ctx.messageId ?
       ['tg', ctx.account, ctx.peerType, ctx.peerId, ctx.messageId].join(':') : '';
     // Reactions may have multiple actors; no tag-based collapse without a verified event ID.
-    return { k: missed ? 'call' : reaction ? 'reaction' : 'msg', t: title, b: clean(group ? sender + ': ' + body : body, MAX_TEXT),
+    return { k: missed ? 'call' : reaction ? 'reaction' : 'msg', t: title, b: clean(group && !groupStory ? sender + ': ' + body : body, MAX_TEXT),
       link: OPEN_LINK, tag: tag, context: ctx, silent: ctx.silent, event: key };
   }
 
