@@ -1,7 +1,7 @@
 {
   "id": "/push/",
-  "name": "BG Push для BeyGram",
-  "short_name": "BG Push",
+  "name": "BeyGram",
+  "short_name": "BeyGram",
   "description": "Уведомления BeyGram на iPhone через Web Push.",
   "start_url": "/push/",
   "scope": "/push/",
