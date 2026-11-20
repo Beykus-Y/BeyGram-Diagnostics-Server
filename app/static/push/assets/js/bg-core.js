@@ -1,7 +1,8 @@
 /*
  * BG Push: криптография и разбор сообщений на устройстве.
  * Классический скрипт без модулей: подключается страницами и service worker (importScripts).
- * Внутренний слой RFC 8188/8291 (aes128gcm) расшифровывается только здесь, через Web Crypto.
+ * Внутренний слой расшифровывается только здесь, через Web Crypto: RFC 8188/8291 (aes128gcm) и конверт
+ * aesgcm, который собирает сервер (см. decryptIngress).
  */
 (function (root) {
   'use strict';
@@ -101,6 +102,62 @@
     return padded.slice(0, end);
   }
 
+  // Конверт aesgcm от сервера: "BGA1" (4) || salt (16) || dh отправителя (65) || rs (4) || шифротекст.
+  // Telegram шлёт aesgcm, где соль и ключ стоят в заголовках; сервер не расшифровывает запись и переносит их сюда.
+  var AESGCM_MAGIC = [0x42, 0x47, 0x41, 0x31];
+  var AESGCM_HEADER_LENGTH = 89;
+
+  function lengthPrefixed(key) {
+    return concat([new Uint8Array([0, key.length]), key]);
+  }
+
+  // draft-ietf-webpush-encryption-04 (aesgcm), одна запись. Совпадает с эталонной http_ece (tests/js).
+  async function decryptAesgcmEnvelope(record, privateKey, receiverPublicRaw, authSecret) {
+    var salt = record.slice(4, 20);
+    var senderPublic = record.slice(20, 85);
+    var ciphertext = record.slice(AESGCM_HEADER_LENGTH);
+    var senderKey = await crypto.subtle.importKey(
+      'raw', senderPublic, { name: 'ECDH', namedCurve: 'P-256' }, false, []
+    );
+    var shared = new Uint8Array(
+      await crypto.subtle.deriveBits({ name: 'ECDH', public: senderKey }, privateKey, 256)
+    );
+    var ikm = await hkdf(shared, authSecret, textEncoder.encode('Content-Encoding: auth\u0000'), 32);
+    var context = concat([
+      textEncoder.encode('P-256\u0000'), lengthPrefixed(receiverPublicRaw), lengthPrefixed(senderPublic)
+    ]);
+    var cek = await hkdf(ikm, salt, concat([textEncoder.encode('Content-Encoding: aesgcm\u0000'), context]), 16);
+    var nonce = await hkdf(ikm, salt, concat([textEncoder.encode('Content-Encoding: nonce\u0000'), context]), 12);
+    var aesKey = await crypto.subtle.importKey('raw', cek, 'AES-GCM', false, ['decrypt']);
+    var padded = new Uint8Array(
+      await crypto.subtle.decrypt({ name: 'AES-GCM', iv: nonce }, aesKey, ciphertext)
+    );
+    if (padded.length < 2) {
+      throw new Error('invalid aesgcm padding');
+    }
+    var padLength = (padded[0] << 8) | padded[1];
+    if (padded.length < 2 + padLength) {
+      throw new Error('invalid aesgcm padding');
+    }
+    return padded.slice(2 + padLength);
+  }
+
+  // Вход service worker: конверт aesgcm от сервера или обычная запись aes128gcm (тестовое сообщение сервера).
+  async function decryptIngress(body, privateKey, receiverPublicRaw, authSecret) {
+    var record = new Uint8Array(body);
+    var startsWithMagic = AESGCM_MAGIC.every(function (b, i) {
+      return record[i] === b;
+    });
+    if (startsWithMagic && record.length >= AESGCM_HEADER_LENGTH + 18) {
+      try {
+        return await decryptAesgcmEnvelope(record, privateKey, receiverPublicRaw, authSecret);
+      } catch (error) {
+        // Соль aes128gcm могла случайно совпасть с магией (1 шанс из 2^32): тогда пробуем обычный формат.
+      }
+    }
+    return decryptAes128gcm(body, privateKey, receiverPublicRaw, authSecret);
+  }
+
   // Ключи приёма (ingress): приватный ключ остаётся на устройстве, сервер получает только публичную часть.
   async function generateReceiverKeys() {
     var pair = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, false, ['deriveBits']);
@@ -163,6 +220,7 @@
     randomBytes: randomBytes,
     concat: concat,
     decryptAes128gcm: decryptAes128gcm,
+    decryptIngress: decryptIngress,
     generateReceiverKeys: generateReceiverKeys,
     parseMessage: parseMessage,
     safeLink: safeLink,

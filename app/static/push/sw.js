@@ -1,5 +1,5 @@
 /*
- * BG Push: service worker. Обрабатывает только push и notificationclick.
+ * BG Push: service worker, версия 2 (конверт aesgcm, см. bg-core.js). Обрабатывает только push и notificationclick.
  * Кэширования и перехвата запросов нет: привязка и токены не должны попадать в кэш.
  */
 importScripts('/push/assets/js/bg-core.js', '/push/assets/js/bg-store.js');
@@ -36,7 +36,7 @@ async function handlePush(event) {
   try {
     if (event.data && state && state.ingressPrivate) {
       var cipher = await event.data.arrayBuffer();
-      var plain = await BgCore.decryptAes128gcm(
+      var plain = await BgCore.decryptIngress(
         cipher, state.ingressPrivate, state.ingressPublicRaw, state.ingressAuth
       );
       message = BgCore.parseMessage(plain);

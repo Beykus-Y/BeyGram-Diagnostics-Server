@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import os
 import stat
 
@@ -82,6 +83,81 @@ def test_interoperates_with_reference_implementation_http_ece():
     sender = ec.generate_private_key(ec.SECP256R1())
     reference = http_ece.encrypt(b"interop-2", private_key=sender, dh=pub, auth_secret=auth)
     assert decrypt_aes128gcm(reference, private_key=key, auth_secret=auth) == b"interop-2"
+
+
+# --- aesgcm (draft-ietf-webpush-encryption-04): конверт для PWA --------------
+
+
+def _aesgcm_record(plaintext: bytes, *, pub: bytes, auth: bytes) -> tuple[bytes, bytes, bytes]:
+    """Запись aesgcm от эталонной http_ece: возвращает (запись, salt, dh отправителя)."""
+    sender = ec.generate_private_key(ec.SECP256R1())
+    salt = os.urandom(16)
+    record = http_ece.encrypt(plaintext, salt=salt, private_key=sender, dh=pub, auth_secret=auth, version="aesgcm")
+    return record, salt, crypto.public_key_bytes(sender.public_key())
+
+
+def test_aesgcm_envelope_layout_and_reference_decryption():
+    key, pub, auth = _receiver()
+    record, salt, sender_pub = _aesgcm_record(b'{"type":"message"}', pub=pub, auth=auth)
+    envelope = crypto.aesgcm_envelope(
+        record, encryption=f"salt={b64url_encode(salt)}", crypto_key=f"dh={b64url_encode(sender_pub)}"
+    )
+    assert envelope[:4] == b"BGA1"
+    assert envelope[4:20] == salt
+    assert envelope[20:85] == sender_pub
+    assert envelope[85:89] == (4096).to_bytes(4, "big")
+    assert envelope[89:] == record
+    opened = http_ece.decrypt(record, salt=salt, private_key=key, dh=sender_pub, auth_secret=auth, version="aesgcm")
+    assert opened == b'{"type":"message"}'
+
+
+def test_aesgcm_envelope_accepts_standard_base64_padding_and_rs():
+    _, pub, auth = _receiver()
+    record, salt, sender_pub = _aesgcm_record(b"x", pub=pub, auth=auth)
+    url_form = crypto.aesgcm_envelope(
+        record, encryption=f"salt={b64url_encode(salt)}", crypto_key=f"dh={b64url_encode(sender_pub)}"
+    )
+    std_form = crypto.aesgcm_envelope(
+        record,
+        encryption=f"rs=4096; salt={base64.b64encode(salt).decode()}",
+        crypto_key=f"p256ecdsa=AAAA;dh={base64.b64encode(sender_pub).decode()}",
+    )
+    assert std_form == url_form
+
+
+def test_aesgcm_envelope_rejects_bad_headers_and_long_bodies():
+    _, pub, auth = _receiver()
+    record, salt, sender_pub = _aesgcm_record(b"payload", pub=pub, auth=auth)
+    good_salt = f"salt={b64url_encode(salt)}"
+    good_dh = f"dh={b64url_encode(sender_pub)}"
+    compressed = b64url_encode(b"\x02" + sender_pub[1:])
+    cases = [
+        ("", good_dh, record),  # нет соли
+        (f"salt={b64url_encode(salt[:8])}", good_dh, record),  # соль не 16 байт
+        (good_salt, "", record),  # нет ключа отправителя
+        (good_salt, f"dh={compressed}", record),  # сжатая точка
+        (good_salt + ";rs=17", good_dh, record),  # rs меньше минимума
+        (good_salt + ";rs=oops", good_dh, record),  # rs не число
+        (good_salt, good_dh, b"x" * 4113),  # тело длиннее rs + 16: несколько записей не разбираем
+        (good_salt + ";rs=100", good_dh, b"x" * 117),
+        ("salt=!!!", good_dh, record),  # не base64
+    ]
+    for encryption, crypto_key, body in cases:
+        with pytest.raises(PushCryptoError):
+            crypto.aesgcm_envelope(body, encryption=encryption, crypto_key=crypto_key)
+
+
+def test_aesgcm_envelope_fits_one_apple_push_record_at_maximum_ingress_size():
+    _, pub, auth = _receiver()
+    sender = ec.generate_private_key(ec.SECP256R1())
+    envelope = crypto.aesgcm_envelope(
+        b"x" * 3900,  # PUSH_MAX_INGRESS_BYTES
+        encryption=f"salt={b64url_encode(os.urandom(16))}",
+        crypto_key=f"dh={b64url_encode(crypto.public_key_bytes(sender.public_key()))}",
+    )
+    assert len(envelope) == 3989
+    outer = encrypt_aes128gcm(envelope, ua_public=pub, auth_secret=auth)
+    assert len(outer) <= 4096, "push-сервис Apple принимает не больше 4 КБ"
 
 
 # --- VAPID (RFC 8292) -------------------------------------------------------
