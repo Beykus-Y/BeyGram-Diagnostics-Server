@@ -71,7 +71,7 @@ async function handlePush(event) {
       body: /^en(?:-|$)/i.test(language) ? 'Test notification received.' : 'Тестовое уведомление получено.',
       tag: 'bg-push-test',
       data: { link: 'beygram://push/open' },
-      icon: '/push/assets/icons/icon-192.png'
+      icon: '/push/assets/icons/icon-192.png?v=2'
     });
     await acknowledge(state, message.id);
     return;
@@ -95,7 +95,7 @@ async function handlePush(event) {
     tag: message.k === 'control' ? 'bg-push-control' : message.tag || undefined,
     silent: message.silent === true || message.k === 'control',
     data: { link: message.link },
-    icon: '/push/assets/icons/icon-192.png'
+    icon: '/push/assets/icons/icon-192.png?v=2'
   });
 }
 
