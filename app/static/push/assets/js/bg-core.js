@@ -276,12 +276,13 @@
         ['Новое уведомление', 'New notification'][l], link: OPEN_LINK, tag: '' };
   }
 
-  // Lexically protect large integer tokens before JSON.parse; quoted strings are untouched.
+  // Protect large integer and noncanonical numeric tokens before JSON.parse; quoted strings are untouched.
+  // Decimal/exponent spellings cannot be silently rounded into valid routing IDs.
   // The parser only treats canonical positive decimal IDs as identifiers.
   function parseJsonLossless(text) {
     return JSON.parse(text.replace(/"(?:[^"\\]|\\[\s\S])*"|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/g,
       function (token) {
-        return /^-?\d+$/.test(token) && !Number.isSafeInteger(Number(token)) ?
+        return token[0] !== '"' && (!/^-?\d+$/.test(token) || !Number.isSafeInteger(Number(token))) ?
           '"' + token + '"' : token;
       }));
   }
