@@ -7,9 +7,9 @@
   <meta name="color-scheme" content="light dark">
   <meta name="referrer" content="no-referrer">
   <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-title" content="BG Push">
+  <meta name="apple-mobile-web-app-title" content="BeyGram">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
-  <title>BG Push</title>
+  <title>BeyGram</title>
   <link rel="manifest" href="/push/manifest.webmanifest">
   <link rel="icon" type="image/png" sizes="192x192" href="/push/assets/icons/icon-192.png">
   <link rel="apple-touch-icon" href="/push/assets/icons/apple-touch-icon.png">
@@ -18,8 +18,8 @@
 <body>
   <main class="wrap">
     <header class="top">
-      <h1>BG Push</h1>
-      <p class="lead">Уведомления BeyGram на iPhone</p>
+      <h1>BeyGram</h1>
+      <p class="lead">BG Push · Уведомления на iPhone</p>
     </header>
 
     <p id="support" class="notice" hidden></p>
@@ -40,6 +40,23 @@
       <button id="test" type="button">Отправить тест</button>
       <button id="refresh" type="button">Обновить статус</button>
       <button id="disable" type="button" class="danger">Отключить на этом устройстве</button>
+    </section>
+
+    <section class="card">
+      <label for="push-privacy" class="label">Содержимое уведомлений</label>
+      <select id="push-privacy" disabled>
+        <option value="full">Полный предпросмотр</option>
+        <option value="name">Только имя или чат</option>
+        <option value="none">Без содержимого</option>
+      </select>
+      <label for="push-language" class="label">Язык уведомлений</label>
+      <select id="push-language" disabled>
+        <option value="system">Системный</option>
+        <option value="ru">Русский</option>
+        <option value="en">English</option>
+      </select>
+      <button id="push-save-preferences" type="button" disabled>Сохранить настройки</button>
+      <p id="push-local-result" class="detail"></p>
     </section>
 
     <p id="message" class="message" role="status"></p>
