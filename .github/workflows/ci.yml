@@ -40,7 +40,7 @@ jobs:
         run: python -m pytest tests -q --basetemp=.pytest-tmp-ci
 
       - name: Set up Node 22
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "22"
 
@@ -93,7 +93,7 @@ jobs:
         working-directory: website
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
       - run: npm install --no-audit --no-fund
