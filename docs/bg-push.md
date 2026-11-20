@@ -157,9 +157,11 @@ bearer-токены, адреса push-сервисов, ключи p256dh и au
 
 Ошибки приходят в формате `{"error": {"code", "message"}}`.
 
-Переход из уведомления: `beygram://push/open?account=<id>&peer=<id>&msg=<id>`. Все параметры необязательны.
-Без них нативный клиент открывает список чатов. PWA строит ссылку только из числовых полей и не исполняет
-URL из payload. Проверку `account`, `peer` и `msg` выполняет нативный клиент.
+Переход из уведомления BG Push 2.1: `beygram://push/open?v=2&account=123&kind=user&rawPeer=456&msg=789`.
+Спецификация: [Navigation v2](bg-push-navigation-v2.md), общие тестовые данные: [JSON](bg-push-navigation-v2.json).
+Legacy `beygram://push/open?account=<id>&peer=<id>&msg=<id>` сохраняется только для прежнего формата.
+PWA формирует v2 локально, rawPeer не передаётся как packed PeerId; новый IPA проверяет аккаунт и доступ.
+Старый IPA или неизвестный маршрут безопасно открывает приложение без целевого чата.
 
 ## Приём Telegram и форматы
 
@@ -253,7 +255,7 @@ READ_REACTION и badge пока не реализованы. Служебный 
 расшифровки, invalid-json-or-utf8 — ошибку представления, unknown-event — неизвестный тип.
 Отсутствие доставки внешнего push невозможно определить из SW, который не был запущен.
 
-Для Telegram payload raw IDs не передаются в старый iOS PeerId: уведомление открывает список чатов.
+Для Telegram payload BG Push 2.1 формирует v2 только при достоверной адресации. Старый IPA не получает legacy peer и открывает приложение без адресного перехода; новый IPA реализуется в iOS #74.
 Теги для сообщений включают подтверждённые account/peer namespace/ID/message ID; реакции не заменяют
 сообщения. Это best effort замена видимого уведомления, не exactly-once доставка.
 
@@ -266,7 +268,8 @@ Telegram/Telegram-iOS/Telegram.icon/Assets, blob b9001d561ca2f0c53d9bdfb50b769f0
 и убедиться в отзыве на сервере до удаления PWA, затем установить заново и создать новую привязку.
 Новый IPA для этого не требуется; точная навигация и мультиаккаунт требуют native изменений.
 
-Синтетические тесты: node --test tests/js/bg-push-notifications.test.cjs.
+Синтетические тесты: `node --test tests/js/bg-push-notifications.test.cjs tests/js/bg-push-navigation.test.cjs`.
+Проверка на iPhone с новым IPA (личные/групповые/канальные сообщения, privacy, cold start, fallback) остаётся обязательной для совместной приёмки.
 Набор также импортируется штатным tests/js/bg-core.test.mjs, который запускается в CI.
 Реальный iPhone, зашифрованный ingress с фактическими Telegram событиями, поведение iOS,
 отображение обновлённой иконки и полная матрица событий остаются обязательными проверками перед production.
