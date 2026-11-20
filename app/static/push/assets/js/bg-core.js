@@ -195,6 +195,9 @@
   // Telegram documents both the data wrapper and per-event argument schemas.
   // Never interpret arbitrary loc_args as preview text.
   var MEDIA = {
+    ALBUM: ['Альбом', 'Album'],
+    STORY: ['История', 'Story'],
+    TODO: ['Список задач', 'Checklist'],
     AUDIO: ['🎤 Голосовое сообщение', '🎤 Voice message'],
     DOC: ['📎 Файл', '📎 File'],
     PHOTO: ['📷 Фото', '📷 Photo'],
@@ -250,6 +253,30 @@
       .slice(0, length).join('');
   }
 
+  var COUNTS = {
+    PHOTOS: [['фотография', 'фотографии', 'фотографий'], ['photo', 'photos']],
+    VIDEOS: [['видео', 'видео', 'видео'], ['video', 'videos']],
+    DOCS: [['файл', 'файла', 'файлов'], ['file', 'files']],
+    PLAYLIST: [['аудиофайл', 'аудиофайла', 'аудиофайлов'], ['audio file', 'audio files']],
+    FWDS: [['пересланное сообщение', 'пересланных сообщения', 'пересланных сообщений'], ['forwarded message', 'forwarded messages']]
+  };
+  function mediaBody(kind, arg, l) {
+    if (Object.prototype.hasOwnProperty.call(COUNTS, kind)) {
+      var count = typeof arg === 'number' ? String(arg) : arg;
+      if (typeof count === 'string' && /^[1-9]\d{0,8}$/.test(count)) {
+        var n = Number(count);
+        var form = l ? (n === 1 ? 0 : 1) :
+          (n % 100 >= 11 && n % 100 <= 14 ? 2 : n % 10 === 1 ? 0 : n % 10 >= 2 && n % 10 <= 4 ? 1 : 2);
+        return count + ' ' + COUNTS[kind][l][form];
+      }
+    }
+    var base = MEDIA[kind][l];
+    if (['STICKER', 'POLL', 'QUIZ', 'TODO'].indexOf(kind) !== -1) {
+      var detail = clean(arg, 120);
+      if (detail) return base + ': ' + detail;
+    }
+    return base;
+  }
   function telegramContext(data) {
     var c = data.custom && typeof data.custom === 'object' && !Array.isArray(data.custom) ? data.custom : {};
     var account = positiveId(data.user_id);
@@ -265,10 +292,28 @@
   function parseTelegram(data, language) {
     var key = data.loc_key;
     if (typeof key !== 'string' || !/^[A-Z_0-9]{1,80}$/.test(key)) return null;
-    if (CONTROL.indexOf(key) !== -1) return fallback(language, true);
+    if (CONTROL.indexOf(key) !== -1) {
+      var control = fallback(language, true);
+      var controlContext = telegramContext(data);
+      var custom = data.custom || {};
+      control.event = key;
+      control.context = controlContext;
+      if (key === 'READ_HISTORY') control.maxId = positiveId(custom.max_id);
+      if (key === 'MESSAGE_DELETED' || key === 'READ_REACTION') {
+        control.ids = typeof custom.messages === 'string' && custom.messages.length <= 4096 ?
+          custom.messages.split(',').map(positiveId).filter(Boolean) : [];
+      }
+      return control;
+    }
+    if (key === 'ENCRYPTED_MESSAGE' || key === 'STORY_HIDDEN_AUTHOR') return fallback(language, false);
+    if (key === 'MESSAGE_ANNOUNCEMENT') {
+      var announcement = clean(data.message, MAX_TEXT);
+      return announcement ? { k: 'service', t: 'Telegram', b: announcement, link: OPEN_LINK, tag: '' } : fallback(language, false);
+    }
+    if (/^(CHAT_|CHANNEL_)?MESSAGES$/.test(key)) key = key.replace(/MESSAGES$/, 'MESSAGE_ALBUM');
     var m = /^(?:(CHAT|CHANNEL)_)?MESSAGE_([A-Z_]+)$/.exec(key);
     var missed = key === 'PHONE_CALL_MISSED' || key === 'CONF_CALL_MISSED';
-    var reaction = /^(CHAT_)?REACT_(TEXT|AUDIO|DOC|PHOTO|VIDEO|ROUND|STICKER|POLL|QUIZ)$/.exec(key);
+    var reaction = /^(CHAT_)?REACT_(TEXT|AUDIO|DOC|PHOTO|VIDEO|ROUND|STICKER|POLL|QUIZ|TODO)$/.exec(key);
     if (data.custom && (data.custom.schedule === true || data.custom.schedule === 1 || data.custom.schedule === '1')) return fallback(language, true);
     if (!missed && !reaction && (!m || (m[2] !== 'TEXT' && !Object.prototype.hasOwnProperty.call(MEDIA, m[2])))) return null;
     var kind = missed ? 'MISSED_CALL' : reaction ? 'REACTION' : m[2];
@@ -284,13 +329,14 @@
       var emoji = clean(args[group ? 2 : 1], 30);
       body = ['Реакция на сообщение', 'Reaction to a message'][l] + (emoji ? ' ' + emoji : '');
     } else if (kind === 'TEXT') body = clean(args[group ? 2 : 1], MAX_TEXT);
-    else body = MEDIA[kind][l];
+    else body = mediaBody(kind, args[group ? 2 : 1], l);
     if (!body) body = ['Новое сообщение', 'New message'][l];
     var ctx = telegramContext(data);
     // Current IPA accepts an internal PeerId, not raw Telegram identifiers.
     // Keep raw IDs local and use the safe chat-list link until native support is agreed.
-    var tag = !missed && !reaction && ctx.account && ctx.peerType && ctx.peerId && ctx.messageId ?
+    var tag = !missed && !reaction && ['ALBUM', 'PHOTOS', 'VIDEOS', 'DOCS', 'PLAYLIST', 'FWDS'].indexOf(kind) === -1 && ctx.account && ctx.peerType && ctx.peerId && ctx.messageId ?
       ['tg', ctx.account, ctx.peerType, ctx.peerId, ctx.messageId].join(':') : '';
+    // Reactions may have multiple actors; no tag-based collapse without a verified event ID.
     return { k: missed ? 'call' : reaction ? 'reaction' : 'msg', t: title, b: clean(group ? sender + ': ' + body : body, MAX_TEXT),
       link: OPEN_LINK, tag: tag, context: ctx, silent: ctx.silent, event: key };
   }
@@ -321,12 +367,29 @@
 
   function applyPrivacy(message, mode, language) {
     if (message.k === 'test' || message.k === 'control') return message;
-    if (mode !== 'name' && mode !== 'none') return message;
+    if (mode === 'full' || mode === undefined) return message;
+    if (mode !== 'name') mode = 'none';
     return Object.assign({}, message, {
-      t: mode === 'none' ? 'BeyGram' : message.t,
+      t: mode === 'none' || message.k === 'service' ? 'BeyGram' : message.t,
       b: fallback(language).b,
       link: mode === 'none' ? OPEN_LINK : message.link
     });
+  }
+
+  // Only notifications tagged by our parser are eligible for read/delete closure.
+  function shouldCloseNotification(control, tag) {
+    if (!control || control.k !== 'control' || !control.context || typeof tag !== 'string') return false;
+    var ctx = control.context;
+    if (!ctx.account || !ctx.peerType || !ctx.peerId) return false;
+    var prefix = ['tg', ctx.account, ctx.peerType, ctx.peerId, ''].join(':');
+    if (tag.indexOf(prefix) !== 0) return false;
+    var id = positiveId(tag.slice(prefix.length));
+    if (!id) return false;
+    if (control.event === 'MESSAGE_DELETED') return Array.isArray(control.ids) && control.ids.indexOf(id) !== -1;
+    if (control.event === 'READ_HISTORY' && control.maxId) {
+      return id.length < control.maxId.length || (id.length === control.maxId.length && id <= control.maxId);
+    }
+    return false;
   }
 
   root.BgCore = {
@@ -341,6 +404,7 @@
     parseDetailed: parseDetailed,
     fallback: fallback,
     applyPrivacy: applyPrivacy,
+    shouldCloseNotification: shouldCloseNotification,
     safeLink: safeLink,
     DEEP_LINK_RE: DEEP_LINK_RE
   };
