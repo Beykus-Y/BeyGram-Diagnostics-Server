@@ -127,7 +127,7 @@
     // Разрешение запрашивается только по нажатию кнопки: иначе браузер его отклонит.
     var permission = await Notification.requestPermission();
     if (permission !== 'granted') {
-      say('Уведомления не разрешены. Включите их в Настройках iPhone для BG Push.', 'bad');
+      say('Уведомления не разрешены. Включите их в Настройках iPhone для BeyGram.', 'bad');
       return;
     }
     var config = await api('/config');
@@ -229,7 +229,47 @@
     });
   }
 
+  async function initPreferences() {
+    var privacy = document.getElementById('push-privacy');
+    var language = document.getElementById('push-language');
+    var save = document.getElementById('push-save-preferences');
+    var status = document.getElementById('push-local-result');
+    if (!privacy || !language || !save || !status) return;
+    var prefs = await BgStore.get('notification-preferences') || {};
+    privacy.value = ['full', 'name', 'none'].indexOf(prefs.privacy) !== -1 ? prefs.privacy : 'full';
+    language.value = ['ru', 'en'].indexOf(prefs.language) !== -1 ? prefs.language : 'system';
+    privacy.disabled = language.disabled = save.disabled = false;
+    guard(save, async function () {
+      await BgStore.set('notification-preferences', { privacy: privacy.value, language: language.value });
+      say('Настройки уведомлений сохранены на устройстве.', 'ok');
+    });
+    async function readResult() {
+      var code = await BgStore.get('last-push-result');
+      var labels = {
+        'missing-registration': 'Нет локальной регистрации',
+        'missing-push-data': 'Пустой push',
+        'inner-decrypt-failed': 'Ошибка внутренней расшифровки',
+        'invalid-json-or-utf8': 'Некорректный формат JSON/UTF-8',
+        'invalid-format': 'Неизвестная структура данных',
+        'unknown-event': 'Неизвестный тип события',
+        'control-event': 'Служебное событие',
+        'missing-preview': 'Нет доступного предпросмотра',
+        'telegram': 'Telegram: данные разобраны',
+        'bg-v1': 'BG Push v1: данные разобраны'
+      };
+      status.textContent = Object.prototype.hasOwnProperty.call(labels, code) ? 'Последний push: ' + labels[code] : '';
+    }
+    await readResult();
+    el.refresh.addEventListener('click', function () { readResult().catch(function () {}); });
+    document.addEventListener('visibilitychange', function () {
+      if (!document.hidden) readResult().catch(function () {});
+    });
+  }
+
   async function init() {
+    await initPreferences().catch(function () {
+      say('Не удалось прочитать локальные настройки уведомлений.', 'bad');
+    });
     if (!supported()) {
       el.support.textContent = 'Этот браузер не поддерживает уведомления. Откройте BG Push с экрана «Домой» в Safari на iOS 16.4 или новее.';
       el.support.hidden = false;
