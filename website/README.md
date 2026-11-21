@@ -35,6 +35,15 @@
 - Оригинальный логотип BeyGram из предоставленного Claude Designer экспорта закреплён как `public/logo.webp` (локальный asset).
 - Шрифты берутся из Google Fonts с системными fallback (файлы шрифтов в репозиторий не добавлены).
 
-## Тестирование
+## Получение релизов (GitHub Releases)
 
-GitHub Actions проверяет сборку TypeScript и Vite. Интеграция в production-nginx намеренно не автоматизирована: нужен просмотр реальной конфигурации сервера перед включением.
+- Android: `src/lib/releases.ts` запрашивает публичный GitHub REST API (`repos/Beykus-Y/BeyGram/releases?per_page=15`), отбрасывает `draft` и `prerelease` (DEV-сборки не попадают на сайт) и выбирает реальные `.apk` assets (`browser_download_url`).
+- При нескольких APK в одном релизе отображаются варианты по ABI; при отсутствии релизов или ошибке/лимите GitHub API (403/429) используется устаревший кэш или честный fallback со ссылкой на `https://github.com/Beykus-Y/BeyGram/releases`.
+- iOS (`Beykus-Y/BeyGram-iOS`) и Windows (`Beykus-Y/BeyGram-Windows`) проверяются аналогично; пока там нет стабильных релизов с поддерживаемыми установщиками, сайт показывает статус «Пока недоступно · в разработке» и ссылки на репозитории.
+- Кэширование выполняется в `localStorage` (10 минут для Android, 30 минут для остальных платформ), токен GitHub в клиент не передаётся.
+
+## Тестирование и откат
+
+- Локально: `npm test` (unit-тесты `tests/releases.test.ts` на Node 22) и `npm run build` (`tsc -b && vite build`).
+- GitHub Actions проверяет `npm test` и `npm run build`. Интеграция в production-nginx намеренно не автоматизирована: нужен просмотр реальной конфигурации сервера перед включением.
+- Откат: пересобрать контейнер `website` на предыдущем коммите (`git checkout <prev_sha> && docker compose --profile website up -d --build website`) или вернуть предыдущий каталог `dist/`. Конфигурация внешнего nginx и FastAPI (`/api/v1/*`, `/push/*`, `/admin/*`, `/healthz`, `/readyz`) при этом не затрагивается.
